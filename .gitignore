@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.env
+.env.*
+outputs/
+runtime-outputs/
+work/
+*.log
+*.sqlite*
+*.db
+*.png
+*.jpg
+*.zip
+!docs/images/*.png

@@ -659,7 +659,12 @@ def _step_impl():
         if replay.get('status')=='completion_replay_limit_reached':
             _attention('blocked','One authorized replay already used; retain unconfirmed task');return
         result=replay
-    if result.get('status') in ('already_completed','review_required'):
+    if result.get('status')=='already_completed':
+        # A platform marker may arrive during initialization/rate readback.
+        # Reconcile on the next queue tick; a completed sibling is not a review.
+        d.monitor_owned_video('stop')
+        _state['current']['sample']=result.get('sample',{});_save();_wake.set();return
+    if result.get('status')=='review_required':
         _attention('awaiting_review',result.get('next_action','Inspect remaining task cards'));return
     if result['sample'].get('playback_rate')!=_rate:
         _attention('blocked','REQUESTED_PLAYBACK_RATE_NOT_APPLIED');return

@@ -69,3 +69,28 @@ def test_duplicate_script_urls_are_resolved_to_selected_video_task():
     assert _player_script_for_frame(cdp,scripts,selected)['scriptId']=='2'
     selected.frame_element.return_value.get_attribute.return_value=json.dumps({'objectid':'missing','_jobid':'missing'})
     with pytest.raises(ValueError,match='ambiguous'):_player_script_for_frame(cdp,scripts,selected)
+
+def test_completion_during_initialization_keeps_selected_frame_and_skips_rate_check(monkeypatch):
+    from chaoxing_learning_mcp import course_direct as d,media_readiness
+    first,second=frame(1),frame(2)
+    first.url='https://fixture/video'
+    sample={'current_time':90,'duration':100,'paused':False,'ended':False,'muted':True,'playback_rate':1.25,'decoded_frames':100}
+    first.locator.return_value.evaluate.return_value=sample
+    media=first.locator.return_value;quiz=Mock();quiz.count.return_value=0
+    first.locator.side_effect=lambda selector:quiz if 'ans-videoquiz' in selector else media
+    first.get_by_text.return_value.count.return_value=0
+    page=Mock();page.evaluate.return_value={}
+    monkeypatch.setattr(d,'_state',{'generation':'fixture','headless':True,'requested_playback_rate':1.25})
+    monkeypatch.setattr(d,'_require_page',lambda:page)
+    monkeypatch.setattr(d,'_run',lambda fn:fn())
+    monkeypatch.setattr(d,'_check_gates',Mock());monkeypatch.setattr(d,'_cards',lambda page:[])
+    selected=Mock(side_effect=[first,second]);monkeypatch.setattr(d,'_ordered_video_frame',selected)
+    monkeypatch.setattr(d,'_video_frames_in_dom_order',lambda page:[first])
+    monkeypatch.setattr(d,'_arm_video_delivery',Mock())
+    monkeypatch.setattr(media_readiness,'wait_ready',lambda *args:first.marker.update(finished=True))
+    rate=Mock();monkeypatch.setattr(d,'apply_owned_rate_debug_test',SimpleNamespace(__wrapped__=rate))
+    watch=Mock();monkeypatch.setattr(d,'monitor_owned_video',watch)
+    monkeypatch.setattr(d,'_watch_sample',lambda frame:sample if frame is first else {'playback_rate':1})
+    result=d.control_owned_video.__wrapped__('play')
+    assert result['status']=='already_completed' and result['sample']['playback_rate']==1.25
+    selected.assert_called_once_with(page);rate.assert_not_called();watch.assert_called_once_with('stop')

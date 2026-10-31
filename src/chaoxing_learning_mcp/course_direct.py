@@ -1152,7 +1152,9 @@ def control_owned_video(action: str = "inspect", bring_to_front: bool = False,
     if action not in ("inspect", "play", "pause"):
         raise ValueError("action must be inspect, play or pause")
     page = _require_page()
+    selected_frame = None
     def control():
+        nonlocal selected_frame
         _check_gates(page)
         if action=='play':
             current=[c for c in _cards(page) if 'active' in c.get('active','').split()]
@@ -1160,6 +1162,7 @@ def control_owned_video(action: str = "inspect", bring_to_front: bool = False,
                 return {'status':'review_required','error_code':'QUIZ_CARD_IS_ACTIVE',
                         'next_action':'observe_chapter_quiz','platform_write':False}
         frame = _ordered_video_frame(page)
+        selected_frame = frame
         video = frame.locator('video')
         def sample():
             return video.evaluate('v => ({current_time:v.currentTime,duration:Number.isFinite(v.duration)?v.duration:null,decoded_frames:v.getVideoPlaybackQuality().totalVideoFrames,paused:v.paused,ended:v.ended,muted:v.muted,playback_rate:v.playbackRate})')
@@ -1231,7 +1234,15 @@ def control_owned_video(action: str = "inspect", bring_to_front: bool = False,
     if action=='inspect':
         previous=_state.get('video_watch',{}).get('sample',{})
         smtp_notifications.observe_playback_started(_state.get('account_id',''),_state.get('generation'),previous,result['sample'])
+    def selected_completed():
+        if selected_frame is None or not _run(lambda:_video_frame_finished(page,selected_frame)):
+            return None
+        monitor_owned_video('stop')
+        return {**result,'status':'already_completed','sample':_run(lambda:_watch_sample(selected_frame)),
+                'platform_write':False,'next_action':'Reconcile the completed task and remaining cards'}
     if action == 'play':
+        completed=selected_completed()
+        if completed:return completed
         _state['requested_playback_rate'] = rate
         # The supported 1.25 path is the inspected player adapter, not its empty menu.
         if rate not in (1.0, 1.25):
@@ -1245,7 +1256,9 @@ def control_owned_video(action: str = "inspect", bring_to_front: bool = False,
                 result['rate_result'] = {'changed':False, 'error_type':type(exc).__name__,'reason':str(exc)[:240]}
         if minimize and not _state.get('headless', True):
             result['window'] = ({'kept_visible':True} if _state.get('keep_window_visible') else minimize_owned_window.__wrapped__())
-        result['sample'] = _run(lambda: _watch_sample(_ordered_video_frame(_state['page'])))
+        completed=selected_completed()
+        if completed:return completed
+        result['sample'] = _run(lambda: _watch_sample(selected_frame))
         if result['sample']['playback_rate']!=rate:
             paused=control_owned_video.__wrapped__('pause')
             result.update(status='rate_not_applied',requested_rate=rate,sample=paused['sample'],

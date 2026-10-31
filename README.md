@@ -4,9 +4,9 @@
 
 源码与桌面程序按 [GPL-3.0-only](LICENSE) 发布，第三方组件保留各自许可；使用声明不改变开源许可证的权利与义务。详见 [第三方声明](THIRD_PARTY_NOTICES.md)。
 
-## v1.9.3 桌面与便携包
+## v1.9.4 桌面与便携包
 
-[下载 Windows 便携包](https://github.com/2924547961/studyflow/releases/latest) · [使用教程与截图](docs/使用教程.md) · [故障处理与回归](docs/故障处理与回归.md) · [版本说明](docs/release-v1.9.3.md)
+[下载 Windows 便携包](https://github.com/2924547961/studyflow/releases/latest) · [使用教程与截图](docs/使用教程.md) · [故障处理与回归](docs/故障处理与回归.md) · [版本说明](docs/release-v1.9.4.md)
 
 解压便携包，双击 `StudyFlow.exe`。无需另装 Python；使用本机 Microsoft Edge。课程自动读取，已有账号使用启动/关闭状态按钮。源码也可直接运行 `python desktop/app.py`，首次启动自动连接本地后端。
 

@@ -9,6 +9,10 @@ $resolvedOutput=[System.IO.Path]::GetFullPath((Join-Path $project $Output))
   --distpath $resolvedOutput --workpath (Join-Path $project 'work/pyinstaller') `
   --specpath (Join-Path $project 'work/pyinstaller') (Join-Path $PSScriptRoot 'desktop_entry.py')
 if($LASTEXITCODE -ne 0){throw 'Portable build failed'}
+# runpy uses the package entry dynamically; retain it explicitly even when the
+# build host cannot discover src-layout packages during hidden-import scanning.
+$packageEntry=Join-Path $resolvedOutput 'StudyFlow/_internal/chaoxing_learning_mcp/__main__.py'
+Copy-Item -LiteralPath (Join-Path $project 'src/chaoxing_learning_mcp/__main__.py') -Destination $packageEntry -Force
 # Qt uses Windows' ICU API. An unrelated ICU DLL on the build host PATH
 # (e.g. Poppler) exports a different ABI and must not shadow System32/icuuc.dll.
 foreach($name in @('icuuc.dll','icudt78.dll')){

@@ -103,6 +103,7 @@ def learning_batch_status() -> dict:
         if (d._state.get('account_id')==current.get('account_id') and
                 query.get('chapterid')==[str(current.get('chapter_id'))] and watch.get('sample')):
             current['sample']=copy.deepcopy(watch['sample'])
+            if watch.get('media_progress'):current['media_progress']=copy.deepcopy(watch['media_progress'])
             observed=watch.get('sample_observed_monotonic')
             current['sample_observed_monotonic']=observed
             current['sample_age_seconds']=round(max(0,time.monotonic()-observed),1) if observed is not None else None
@@ -232,7 +233,11 @@ def resume_learning_batch(restart_idle_dispatcher:bool=False) -> dict:
         if d._state.get('submit_attempted') or d.course_extension._pending:
             raise ValueError('Resolve pending submission/review before resuming')
         alive=bool(_thread and _thread.is_alive())
-        if _state['status'] not in ('awaiting_review','awaiting_verification','blocked') and not (_state['status']=='running' and not alive):
+        if _state['status']=='running' and alive and not restart_idle_dispatcher:
+            return learning_batch_status()
+        if _state['status']=='stopped' and not _plan:
+            raise ValueError('No retained course queue to resume')
+        if _state['status'] not in ('awaiting_review','awaiting_verification','blocked','stopped','running'):
             raise ValueError('No pending review/verification/blocker to resume')
         _state.update(status='running',review_required=False,attention_owner='script',user_action_required=False)
         from .runtime_resilience import clear
@@ -295,20 +300,33 @@ def defer_current_learning_task(issue_id:str, reason:str, evidence_url:str) -> d
     return {'deferred':entry,'platform_write':False,'course_completed':False,'browser_restarted':False}
 
 
+def _video_completion(d,observed):
+    """Count required media tasks, never completed documents or a finished sibling."""
+    count=sum(f.get('videos',0) for f in observed.get('frames',[]))
+    if count>1:
+        inventory=d.inspect_owned_media_tasks()
+        progress={k:inventory[k] for k in ('required_video_count','completed_video_count','next_video_number')}
+        return inventory['all_required_completed'],progress
+    markers=[m for f in observed.get('frames',[]) for m in f.get('task_markers',[])
+             if 'videoContainer' in m.get('class_name','').split()]
+    finished=len(markers)==1 and 'ans-job-finished' in markers[0].get('class_name','').split()
+    return finished,None
+
+
 def inspect_current_task() -> dict:
     """Compact fresh inspection distinguishing quiz, completed video, player and loading."""
     from . import course_direct as d
     page=d.inspect_owned_page();cards=page.get('cards',[]);frames=page.get('frames',[])
     active=[c for c in cards if 'active' in c.get('active','').split()]
-    finished=any('videoContainer' in m.get('class_name','') and 'ans-job-finished' in m.get('class_name','')
-                 for f in frames for m in f.get('task_markers',[]))
+    finished,media_progress=_video_completion(d,page)
     result={'account_id':d._state.get('account_id'),'server_pid':page.get('server_pid'),
             'generation':page.get('generation'),'cards':cards,'video_finished_marker':finished}
+    if media_progress:result['media_progress']=media_progress
     result['teacher_quiz_unavailable']=any('教师未创建完成该测验' in f.get('text','') for f in frames)
     if len(active)==1 and re.search('测验|测试|练习',active[0].get('text','')):
         result.update(task_state='chapter_quiz_review',next_action='observe_chapter_quiz')
     elif finished:result.update(task_state='video_completed',next_action='Confirm directory and remaining cards; do not replay')
-    elif sum(f.get('videos',0) for f in frames)==1:
+    elif sum(f.get('videos',0) for f in frames)>=1:
         result.update(task_state='video',sample=d.control_owned_video('inspect')['sample'])
     else:result.update(task_state='loading_or_nonvideo',next_action='Wait for active task card; do not blindly play')
     return result
@@ -466,9 +484,12 @@ def _adopt_completed_video(d, current):
     if query.get('chapterid') != [str(current.get('chapter_id'))]:return False
     expected=dict(re.findall(r'(courseid|clazzid):([^:]+)',current.get('course_id','')))
     if not expected or any(query.get(k)!=[v] for k,v in expected.items()):return False
-    markers=[m for f in page.get('frames',[]) for m in f.get('task_markers',[])
-             if 'videoContainer' in m.get('class_name','').split()]
-    if len(markers)!=1 or 'ans-job-finished' not in markers[0].get('class_name','').split():return False
+    if sum(f.get('videos',0) for f in page.get('frames',[]))>1:
+        frame=watch.get('frame')
+        if frame is None or not d._run(lambda:d._video_frame_finished(d._require_page(),frame)):return False
+    else:
+        finished,_=_video_completion(d,page)
+        if not finished:return False
     watch.update(enabled=False,status='ended_needs_task_confirmation')
     return True
 
@@ -528,8 +549,7 @@ def _step_impl():
             return
     if current and current.get('report_started') and current.get('course_id')==course['course_id']:
         evidence=d.inspect_owned_page()
-        if any('videoContainer' in m.get('class_name','') and 'ans-job-finished' in m.get('class_name','')
-               for f in evidence.get('frames',[]) for m in f.get('task_markers',[])):
+        if _video_completion(d,evidence)[0]:
             reporter.record(account_id,(course['course_id'],current['chapter_id'],'video'),
                             'video',course['name']+' / '+current['chapter'])
     inventory=tasks.inspect_course(account_id,course['url'])
@@ -589,7 +609,8 @@ def _step_impl():
     public_course['status']='running'
     frames=observed.get('frames',[])
     videos=[f for f in frames if f.get('videos')]
-    finished=any('ans-job-finished' in m.get('class_name','') for f in frames for m in f.get('task_markers',[]))
+    finished,media_progress=_video_completion(d,observed)
+    if media_progress:_state['current']['media_progress']=media_progress
     quiz_cards=[c for c in observed.get('cards',[]) if re.search('测验|测试|练习',c.get('text',''))]
     if finished and report_started:
         attempt=_state.get('completion_replay_attempt',{})
@@ -613,16 +634,16 @@ def _step_impl():
         if remaining is None or remaining['task_id']!=chapter_id:
             _state.pop('current',None);_save();return
         _attention('blocked','Video marker complete but directory still incomplete; inspect other task cards');return
-    if len(videos)!=1:
-        candidates=[c for c in observed.get('cards',[]) if re.search('视频',c.get('text',''))]
+    if not videos:
+        candidates=[c for c in observed.get('cards',[]) if re.search('视频|知识学习',c.get('text',''))]
         if len(candidates)==1:
             observed=d.select_course_card(candidates[0]['selector'])
             for _ in range(3):
-                if sum(f.get('videos',0) for f in observed.get('frames',[]))==1:break
+                if sum(f.get('videos',0) for f in observed.get('frames',[]))>=1:break
                 _wake.wait(2)
                 if _state['status']=='stopped':return
                 observed=d.inspect_owned_page()
-            if sum(f.get('videos',0) for f in observed.get('frames',[]))!=1:
+            if sum(f.get('videos',0) for f in observed.get('frames',[]))<1:
                 from .runtime_resilience import LoadingTransient
                 raise LoadingTransient('Selected video card did not finish loading')
         else:
@@ -646,6 +667,7 @@ def _step_impl():
         begin(account_id)
         _state['current']['report_started']=True
     _state['current']['sample']=result['sample'];_save()
+    if media_progress:d._state.get('video_watch',{})['media_progress']=dict(media_progress)
 
 
 def _handle_failure(exc):

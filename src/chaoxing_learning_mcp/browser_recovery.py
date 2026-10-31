@@ -60,7 +60,14 @@ def adopt_surviving_page(state):
             try:
                 if attempt_key(p.url)==run.identity:matching.append(p)
             except ValueError:pass
-        pages=matching
+        if matching:pages=matching
+        elif getattr(run,'state',None) in ('graded','submitted') and pages:
+            # Showing an existing owned tab is read-only. A settled old attempt
+            # must not block window restoration; exam writers still select the
+            # unique current attempt independently in owned_exam._driver.
+            state['page']=pages[-1]
+            return True
+        else:pages=[]
     if len(pages)!=1:return False
     state['page']=pages[0]
     return True

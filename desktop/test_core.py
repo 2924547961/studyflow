@@ -224,7 +224,7 @@ class DesktopTests(unittest.TestCase):
     def test_payload_excludes_secrets(self):
         obs=copy.deepcopy(OBS);obs.update(password='SECRET',cookies='COOKIE',page_url='SIGNED',username='USER')
         self.assertNotIn('SECRET',str(question_payload(obs)))
-        self.assertEqual(set(question_payload(obs)[0]),{'question','type_hint','options'})
+        self.assertEqual(set(question_payload(obs)[0]),{'question','type_hint','options','required_selection_count'})
     def test_invalid_model_shapes(self):
         for p in [[],None,{'answers':['C'],'reviews':[{}]}, {'answers':['A'],'reviews':[{'certain':False}]}]:
             with self.assertRaises(ActionError):validate_proposal(OBS['questions'],p)

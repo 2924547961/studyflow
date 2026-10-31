@@ -7,7 +7,8 @@ import time
 
 INTERVAL=3600
 
-def reserve(account,recipient,previous=0,*,directory=None,now=None):
+def reserve(account,recipient,previous=0,*,directory=None,now=None,interval=None):
+    interval=INTERVAL if interval is None else interval
     now=time.time() if now is None else now
     root=Path(directory or Path(tempfile.gettempdir())/'studyflow-mail-hourly-limits')
     root.mkdir(parents=True,exist_ok=True)
@@ -26,11 +27,11 @@ def reserve(account,recipient,previous=0,*,directory=None,now=None):
             stream.seek(1)
             raw=stream.read().decode('ascii')
             last=max(float(raw or 0),previous or 0)
-            if last and now-last<INTERVAL:
+            if last and now-last<interval:
                 if previous and previous>float(raw or 0):
                     stream.seek(1);stream.truncate();stream.write(str(last).encode('ascii'))
                     stream.flush();os.fsync(stream.fileno())
-                return max(1,int(INTERVAL-(now-last)))
+                return max(1,int(interval-(now-last)))
             # Reserve before SMTP: an unknown delivery consumes its slot too.
             stream.seek(1);stream.truncate();stream.write(str(now).encode('ascii'))
             stream.flush();os.fsync(stream.fileno())

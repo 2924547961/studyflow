@@ -2,12 +2,46 @@
 import html
 import json
 import os
+import time
 from urllib.parse import parse_qs, urlsplit
 import pytest
 from playwright.sync_api import sync_playwright
 from chaoxing_learning_mcp.exam_browser import SequentialExam, ExamRun, EXAM_PATH, PREVIEW_PATH
 from chaoxing_learning_mcp.exam_finish import _submit_once
 from chaoxing_learning_mcp.exam import parse_exam_grading
+
+
+@pytest.mark.skipif(os.environ.get('STUDYFLOW_BROWSER_FIXTURE_TEST')!='1',reason='Explicit offline browser test')
+def test_manual_new_tab_is_detected_after_completed_tab_is_retained(monkeypatch):
+    from chaoxing_learning_mcp import course_direct as d
+    from chaoxing_learning_mcp.exam_finish import owned_exam_finish_status
+    with sync_playwright() as pw:
+        browser=pw.chromium.launch(channel='msedge',headless=True)
+        try:
+            context=browser.new_context()
+            new_url='https://fixture.chaoxing.com'+EXAM_PATH+'?courseId=1&classId=2&tId=3&id=new'
+            source='''<div class="h2_subject">Fixture course</div><div class="mark_info">题量：1</div>
+            <input id="start" value="0"><input id="answerLocked" value="0">
+            <div class="singleQuesId" data="1"><input name="type1" value="0"><input name="answers1" value="">
+            <h3 class="mark_name"><div>Fixture question</div></h3><div class="stem_answer"><div class="answerBg"><span data="A">A</span><div class="answer_p">Choice</div></div></div></div>'''
+            context.route('**/*',lambda route:route.fulfill(content_type='text/html; charset=utf-8',body=source))
+            old=context.new_page();old.goto('https://fixture.chaoxing.com'+PREVIEW_PATH+'?courseId=1&classId=2&examRelationId=3&examRelationAnswerId=old')
+            listing=context.new_page();listing.goto('https://fixture.chaoxing.com/exam-list')
+            listing.set_content('<a id="start" target="_blank" href="'+html.escape(new_url,quote=True)+'">Start manually</a>')
+            monkeypatch.setattr(d,'_state',{'context':context,'owned_exam_run':ExamRun('owned',('fixture.chaoxing.com','1','2','3','old'),state='graded')})
+            monkeypatch.setattr(d,'_run',lambda fn:fn())
+            monkeypatch.setattr(d,'_check_gates',lambda _:None)
+            listing.locator('#start').click()
+            result=owned_exam_finish_status(refresh=True)
+            deadline=time.monotonic()+5
+            while result.get('progress',{}).get('title')!='Fixture course' and time.monotonic()<deadline:
+                listing.wait_for_timeout(250)
+                result=owned_exam_finish_status(refresh=True)
+            assert result['progress']['title']=='Fixture course'
+            assert result['progress']['next_question_number']==1
+            assert d._state['owned_exam_run'].identity[-1]=='new'
+            assert len(context.pages)==3
+        finally:browser.close()
 
 
 @pytest.mark.skipif(os.environ.get('STUDYFLOW_BROWSER_FIXTURE_TEST')!='1',reason='Explicit offline browser test')

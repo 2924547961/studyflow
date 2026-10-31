@@ -6,6 +6,11 @@ import time
 
 def _driver():
     from . import course_direct as d
+    # Drain pending Playwright tab events before using its cached pages collection.
+    for candidate in d._state['context'].pages:
+        if candidate.is_closed():continue
+        try:candidate.title();break
+        except Exception:continue
     pages = []
     for page in d._state['context'].pages:
         if page.is_closed():
@@ -15,12 +20,15 @@ def _driver():
         except ValueError:
             continue
         pages.append((page, identity))
+    run = d._state.get('owned_exam_run')
+    if len(pages)>1 and run is not None and run.state in ('graded','submitted'):
+        newer=[item for item in pages if item[1]!=run.identity]
+        if len(newer)==1:pages=newer
     if not pages:
         raise ValueError('EXAM_PAGE_NOT_OPEN')
     if len(pages) != 1:
         raise ValueError('EXAM_PAGE_AMBIGUOUS')
     page, identity = pages[0]
-    run = d._state.get('owned_exam_run')
     if run is not None and run.identity != identity and run.state in ('graded','submitted'):
         finish = d._state.get('exam_finish')
         if finish and finish['thread'].is_alive():
@@ -54,6 +62,7 @@ def read_owned_exam_question():
         if urlsplit(driver.page.url).path == PREVIEW_PATH:
             return driver.audit()
         current = driver.read()
+        d._state['owned_exam_current']=current
         return {'current':current, 'verified_cache':driver.verified_cache(current),
                 'progress':driver.run.progress()}
     return d._run(read)
@@ -124,6 +133,7 @@ def owned_exam_review_inventory():
             plan = driver.verified_cache({**snapshot, 'questions':[q]})
             if plan:
                 cached.append(q['question_id'])
+                driver.run.reviews[q['fingerprint']]=plan
                 if q.get('saved_answer') == plan['answer']:
                     driver.run.saved[q['question_id']] = {'answer':plan['answer'], 'fingerprint':q['fingerprint']}
             elif q['fingerprint'] in driver.run.reviews:

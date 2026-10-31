@@ -1,7 +1,7 @@
 """Native sidebar workspace; all controls are wired to existing application actions."""
 from PyQt6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QTableWidget,
     QHeaderView,QPlainTextEdit,QCheckBox,QLineEdit,QComboBox,QFormLayout,QGroupBox,
-    QListWidget,QStackedWidget,QSpinBox,QProgressBar,QAbstractItemView,QScrollArea,QFrame)
+    QListWidget,QStackedWidget,QSpinBox,QProgressBar,QAbstractItemView,QScrollArea,QFrame,QMenu)
 
 def build_ui(w):
     def label(text,name=''):
@@ -29,10 +29,14 @@ def build_ui(w):
         pages.addWidget(scroll);return p_layout
     al=page('账号与浏览器','本地脚本每2秒直接读取真实视频进度；不估算、不调用模型。双击账号行可打开对应浏览器。')
     bar=QHBoxLayout();al.addLayout(bar)
-    for text,fn,primary in [('添加并启动账号',w.add_account,True),('启动账号',w.start_account,True),('刷新状态',w.poll,False),('查看题目与正确率',w.show_question_results,False),('查看详情',w.details,False),('打开账号浏览器',w.show_browser,False),('返回后台学习',w.return_background,False),('只读预览',w.preview_browser,False)]:
+    for text,fn,primary in [('添加账号',w.add_account,True),('启动账号',w.toggle_account,True),('打开账号浏览器',w.show_browser,False)]:
         b=button(text,fn,primary);bar.addWidget(b)
-        if text not in ('添加并启动账号','刷新状态'):w.account_actions.append(b)
+        if text=='启动账号':w.account_toggle=b
+        if text!='添加账号':w.account_actions.append(b)
         else:b.setEnabled(bool(w.adapter))
+    more=button('更多',lambda:None);menu=QMenu(more);more.setMenu(menu);bar.addWidget(more)
+    for text,fn in [('刷新状态',w.poll),('更新课程',w.fetch_courses),('查看题目与正确率',w.show_question_results),('查看详情',w.details),('返回后台学习',w.return_background),('只读预览',w.preview_browser)]:
+        action=menu.addAction(text,fn);w.account_actions.append(action)
     w.account_feedback=label('启动结果会显示在这里；浏览器状态与课程状态分别核验。','muted');w.account_feedback.setWordWrap(True);al.addWidget(w.account_feedback)
     bar.addStretch();w.table=QTableWidget(0,6);w.table.setHorizontalHeaderLabels(['账号','状态','当前章节','媒体采样','采样时间','提示'])
     w.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows);w.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
@@ -44,12 +48,11 @@ def build_ui(w):
     w.detail=QPlainTextEdit();w.detail.setReadOnly(True);w.detail.setPlaceholderText('选中账号后查看课程队列、平台完成数量和待处理状态');w.detail.setMaximumHeight(180);al.addWidget(w.detail)
     ql=page('课程队列','勾选多门课程，拖动排序。每门课内按章节连续执行，单个账号异常不暂停其他账号。')
     bar=QHBoxLayout();ql.addLayout(bar)
-    b=button('读取我的课程',w.fetch_courses);bar.addWidget(b);w.account_actions.append(b)
     w.start_queue_button=button('开始完成所选课程（0门）',w.start_queue,True);bar.addWidget(w.start_queue_button)
     w.queue_mode=QComboBox();w.queue_mode.addItem('无头 · 不显示窗口','headless');w.queue_mode.addItem('有界面 · 最小化','minimized')
     bar.addWidget(w.queue_mode);w.queue_rate=QComboBox();w.queue_rate.addItem('1.25 倍速',1.25);w.queue_rate.addItem('1 倍速',1);bar.addWidget(w.queue_rate);bar.addStretch()
     w.course_list=QListWidget();w.course_list.setObjectName('courses');w.course_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove);ql.addWidget(w.course_list,1)
-    w.queue_hint=label('先读取所选账号的课程，再勾选需要连续完成的课程。','muted');ql.addWidget(w.queue_hint)
+    w.queue_hint=label('登录后自动读取课程，勾选需要连续完成的课程。','muted');ql.addWidget(w.queue_hint)
     bar=QHBoxLayout();ql.addLayout(bar)
     for text,fn,primary in [('恢复当前队列',lambda:w.queue_action('resume_learning_batch'),False),('暂停当前队列',lambda:w.queue_action('stop_learning_batch'),False)]:
         b=button(text,fn,primary);bar.addWidget(b);w.account_actions.append(b)
@@ -65,7 +68,6 @@ def build_ui(w):
     form.addRow('剩余时间严格小于',w.exam_threshold)
     w.exam_mail=QCheckBox('判分后发送到当前账号的接收邮箱');w.exam_mail.setChecked(True);form.addRow(w.exam_mail);el.addWidget(box)
     exam_courses=QHBoxLayout();w.exam_course=QComboBox();w.exam_course.setMinimumWidth(300);exam_courses.addWidget(w.exam_course,1)
-    exam_courses.addWidget(button('读取考试课程',w.fetch_courses))
     b=button('打开所选课程考试',w.open_selected_exam,True);exam_courses.addWidget(b);w.account_actions.append(b);el.addLayout(exam_courses)
     exam_browser=QPushButton('显示当前账号浏览器 · 本人验证');exam_browser.clicked.connect(w.show_browser);el.addWidget(exam_browser)
     w.exam_info=label('① 打开独立浏览器 → ② 选择课程和考试，完成滑块/人脸 → ③ 回此处读取整卷。工作台只接管该账号实际打开的唯一试卷。','banner');el.addWidget(w.exam_info)
@@ -82,7 +84,8 @@ def build_ui(w):
     el.addWidget(w.exam_answer_detail)
     w.exam_action_bar=QWidget();bar=QHBoxLayout(w.exam_action_bar);el.addWidget(w.exam_action_bar)
     b=button('整卷预览',w.preview_exam,False);bar.addWidget(b);w.account_actions.append(b)
-    b=button('仅审阅（不作答）',w.prepare_exam);bar.addWidget(b);w.account_actions.append(b)
+    more=button('更多',lambda:None);menu=QMenu(more);more.setMenu(menu)
+    action=menu.addAction('仅审阅（不作答）',w.prepare_exam);w.account_actions.append(action);bar.addWidget(more)
     w.fill_button=button('读取整卷并连续作答',w.fill_exam,True);bar.addWidget(w.fill_button)
     w.fill_button.setToolTip('读取当前整卷并审阅，随后返回答题页连续暂存；仅勾选自动交卷时才按条件交卷。')
     b=button('停止脚本',w.stop_exam);bar.addWidget(b);w.account_actions.append(b);bar.addStretch()
@@ -119,9 +122,11 @@ def build_ui(w):
     form.addRow('发件邮箱',w.sender);form.addRow('授权码',w.smtp);sl.addWidget(box)
     bar=QHBoxLayout();bar.addWidget(button('应用发件配置',w.configure_mail,True));bar.addWidget(button('读取当前配置',w.mail_status));bar.addStretch();sl.addLayout(bar)
     recipients=QHBoxLayout();recipients.addWidget(label('当前账号接收邮箱'));w.recipient=QLineEdit();w.recipient.setPlaceholderText('example@qq.com');recipients.addWidget(w.recipient)
-    b=button('保存接收邮箱',w.bind_mail);recipients.addWidget(b);w.account_actions.append(b);sl.addLayout(recipients)
+    recipients.addWidget(label('常规邮件间隔'))
+    w.mail_interval=QSpinBox();w.mail_interval.setRange(1,1440);w.mail_interval.setValue(60);w.mail_interval.setSuffix(' 分钟');recipients.addWidget(w.mail_interval)
+    b=button('保存通知设置',w.bind_mail);recipients.addWidget(b);w.account_actions.append(b);sl.addLayout(recipients)
     w.mail_info=QPlainTextEdit();w.mail_info.setReadOnly(True);sl.addWidget(w.mail_info,1)
-    sl.addWidget(label('沿用 MCP 的人脸二维码、过期刷新、小时汇总与异常通知。人脸认证由本人完成。','muted'))
+    sl.addWidget(label('常规邮件默认60分钟；修改后重新计时并保留未汇总记录。本人验证截图仍按验证事件去重和时效检查。','muted'))
     ll=page('事件记录','只看课程完成、题目答案与平台正确率、实际邮件。运行状态和实时视频进度请看“账号与浏览器”。')
     filters=QHBoxLayout();w.log_current=QCheckBox('只看当前账号');w.log_current.setChecked(True);filters.addWidget(w.log_current)
     w.log_category=QComboBox();w.log_category.addItems(['学习记录','课程','答题','邮件','错误','全部记录']);filters.addWidget(w.log_category)

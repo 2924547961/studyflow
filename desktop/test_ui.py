@@ -15,6 +15,47 @@ class UITests(unittest.TestCase):
     def setUpClass(cls):
         cls.app=QApplication.instance() or QApplication([]);cls.app.setStyleSheet(STYLE)
         QFontDatabase.addApplicationFont('C:/Windows/Fonts/msyh.ttc');cls.app.setFont(QFont('Microsoft YaHei UI',10))
+
+    def test_waiting_exam_intent_resumes_once_after_manual_new_tab(self):
+        w=Window();w.timer.stop();w.adapter=Mock();jobs=[];w.task=lambda k,fn:jobs.append((k,fn))
+        w.done('status',{'accounts':[{'account_id':'fixture','status':'ready','current':{}}]})
+        w.prepare_exam();self.assertIn('fixture',w.exam_intents)
+        w.failed('考试审阅:fixture','EXAM_PAGE_NOT_OPEN');self.assertTrue(w.exam_intents['fixture']['waiting'])
+        jobs.clear()
+        data={'progress':{'state':'ready','title':'Fixture course','total':85,'saved_count':0,'run_id':'new','questions':[]}}
+        w.done('考试进度:fixture',data);w.done('考试进度:fixture',data)
+        self.assertEqual([key for key,fn in jobs].count('考试审阅:fixture'),1)
+        w.close()
+
+    def test_course_lists_load_automatically_and_account_button_tracks_browser(self):
+        from PyQt6.QtWidgets import QPushButton
+        w=Window();w.timer.stop();w.adapter=Mock();jobs=[];w.task=lambda k,fn:jobs.append((k,fn))
+        w.done('status',{'accounts':[{'account_id':'fixture','status':'ready','current':{}}]});w.rows={'fixture':{'status':'ready'}}
+        jobs.clear();w.poll();first=[key for key,fn in jobs]
+        self.assertIn('课程清单:fixture',first)
+        w.done('课程清单:fixture',{'account_id':'fixture','result':{'account_id':'fixture','courses':[{'name':'Course A'}]}})
+        self.assertEqual(w.exam_course.currentText(),'Course A')
+        w.done('浏览器状态:fixture',{'running':True});self.assertEqual(w.account_toggle.text(),'关闭账号')
+        jobs.clear();w.toggle_account();self.assertEqual(jobs[-1][0],'关闭账号:fixture')
+        texts=[b.text() for b in w.findChildren(QPushButton)]
+        self.assertNotIn('读取考试课程',texts);self.assertNotIn('添加并启动账号',texts)
+        w.close()
+
+    def test_notification_interval_saves_to_selected_account(self):
+        w=Window();w.timer.stop();w.adapter=Mock();jobs=[];w.task=lambda k,fn:jobs.append((k,fn))
+        w.done('status',{'accounts':[{'account_id':'fixture','status':'ready','current':{}}]})
+        w.mail_interval.setValue(15);w.bind_mail();jobs[-1][1]()
+        w.adapter.route.assert_called_with('fixture','configure_notification_interval',minutes=15)
+        w.close()
+
+    def test_multiple_video_card_displays_current_task_and_confirmed_count(self):
+        w=Window();w.timer.stop();w.task=Mock()
+        w.done('status',{'accounts':[{'account_id':'fixture','status':'running','current':{
+            'chapter':'多视频卡片','sample':{'current_time':12,'duration':None,'playback_rate':1.25},
+            'media_progress':{'required_video_count':2,'completed_video_count':1,'next_video_number':2}}}]})
+        text=w.table.item(0,3).text()
+        self.assertIn('视频 2/2',text);self.assertIn('已确认 1',text);self.assertIn('12 / —s',text)
+        w.close()
     def test_three_account_navigation_queue_and_exam_progress(self):
         w=Window();w.timer.stop();w.adapter=Mock();w.task=Mock()
         w.done('status',{'accounts':[{'account_id':f'acc{i}','status':'ready','current':{}} for i in (1,2,3)]})

@@ -1,0 +1,16 @@
+# 多视频知识学习卡片
+
+同一“知识学习”卡片可能包含多个独立必做视频及文档等其他附件。软件按每个视频 iframe 的任务身份与所属容器识别完成状态，按文档树顺序逐个播放。
+
+- 必做视频需要 objectid 与任务号；可选素材不计必做数量。
+- 当前视频单独完成后重新选择下一段，并把本地播放监听绑定到新 frame。
+- 已完成文档或前一个视频不会完成整张卡片，也不会停止后一个视频。
+- 倍速适配在多个同 URL 脚本间按目标 iframe 身份定位；实际速率必须回读。
+- 全部必做视频完成后才进入测验/目录核验。播放 ended 不等同平台确认，已完成视频不重播。
+- 任务身份缺失、重复、未知提交或本人验证时保留现场，错误只影响当前账号。
+
+只读诊断：`inspect_owned_video_delivery(read_task_inventory=true)`。
+返回每段真实媒体样本、脱敏任务哈希以及 `required_video_count`、`completed_video_count`、`next_video_number`，不返回原始任务数据。
+队列缓存的 `current.media_progress` 包含同样的三个计数字段，供桌面显示。
+
+验证：针对媒体、任务选择、完成判断及队列回归运行相关 pytest；设置 `STUDYFLOW_BROWSER_FIXTURE_TEST=1` 后可运行 `tests/test_multi_video_browser.py`。该测试用 ffmpeg 生成两秒短片，在隔离 Edge 中拦截全部请求，验证两段顺序播放、分别完成及禁止重复播放，不写真实平台任务。

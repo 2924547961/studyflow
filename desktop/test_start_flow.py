@@ -40,6 +40,7 @@ def test_course_selection_requires_explicit_start_and_routes_only_selected_cours
     w.course_list.item(1).setCheckState(Qt.CheckState.Checked)
     assert w.start_queue_button.isEnabled() and '1门' in w.start_queue_button.text()
     w.adapter.call.assert_not_called()
+    w.adapter.call.return_value={'ok':True,'results':[{'account_id':'fixture','status':'starting'}]}
     def task(key,fn):
         w.busy.add(key);fn()
     w.task=task;w.start_queue_button.click()

@@ -51,6 +51,9 @@ def _submit_once(driver, state):
     seconds = remaining_seconds(page.locator('body').inner_text(timeout=3000))
     decision = completion_decision(seconds, state['threshold_minutes'],
                                    audit['all_reviewed_answers_match'], state['attempted'])
+    if state.get('submit_now') and audit['all_reviewed_answers_match'] and not state['attempted']:
+        driver.read(preview=True)  # retain identity, expiry and answer-lock guards
+        decision='submit'
     state.update(remaining_seconds=seconds, status=decision)
     if decision != 'submit': return
     button = _visible_submit(page)
@@ -117,6 +120,7 @@ def _watch(state):
                     # No server request; audit again only when the visible timer is due.
                     seconds = remaining_seconds(driver.page.locator('body').inner_text(timeout=3000))
                     decision = completion_decision(seconds, state['threshold_minutes'], True, False)
+                    if state.get('submit_now'):decision='submit'
                     state.update(remaining_seconds=seconds, status=decision)
                     if decision == 'submit': _submit_once(driver, state)
                 d._run(tick)
@@ -129,7 +133,8 @@ def _watch(state):
         state.update(status='submission_unknown' if state['attempted'] else 'needs_attention', error_type=type(exc).__name__)
 
 
-def start_owned_exam_finish(authorized: bool, threshold_minutes: float = 80, notify_email: bool = True):
+def start_owned_exam_finish(authorized: bool, threshold_minutes: float = 40, notify_email: bool = True,
+                            submit_now:bool=False):
     """After full-preview audit, watch visible remaining time and submit once below threshold."""
     from . import course_direct as d
     from .owned_exam import _driver
@@ -148,7 +153,7 @@ def start_owned_exam_finish(authorized: bool, threshold_minutes: float = 80, not
                 raise ValueError('All reviewed answers must match full preview')
             return driver.run.run_id
         run_id = d._run(prepare)
-        state = dict(run_id=run_id, threshold_minutes=threshold_minutes, notify_email=notify_email,
+        state = dict(run_id=run_id, threshold_minutes=threshold_minutes, notify_email=notify_email,submit_now=submit_now,
                      attempted=False, status='waiting', remaining_seconds=None, grading_checks=0, stop=threading.Event())
         state['thread'] = threading.Thread(target=_watch, args=(state,), daemon=True, name='studyflow-exam-finish')
         d._state['exam_finish'] = state
@@ -156,15 +161,37 @@ def start_owned_exam_finish(authorized: bool, threshold_minutes: float = 80, not
     return owned_exam_finish_status()
 
 
-def owned_exam_finish_status():
+def owned_exam_finish_status(refresh:bool=False):
     from . import course_direct as d
+    presence_error=None
+    if refresh:
+        def sync():
+            from .owned_exam import _driver
+            from .exam_browser import PREVIEW_PATH
+            from urllib.parse import urlsplit
+            run=d._state.get('owned_exam_run')
+            if run and run.state in ('saving','needs_attention','submission_unknown'):return
+            driver=_driver()
+            d._check_gates(driver.page)
+            if urlsplit(driver.page.url).path!=PREVIEW_PATH:
+                d._state['owned_exam_current']=driver.read()
+        try:d._run(sync)
+        except ValueError as exc:
+            if str(exc)!='EXAM_PAGE_NOT_OPEN':presence_error=str(exc)[:120]
+        except Exception as exc:presence_error=type(exc).__name__
     state = d._state.get('exam_finish')
     result = copy.deepcopy({k:v for k,v in state.items() if k not in ('thread','stop')}) if state else {'status':'idle'}
+    if presence_error:result['presence_error']=presence_error
     run = d._state.get('owned_exam_run')
     if run is not None:
         progress = run.progress()
+        saved_snapshot=dict(run.saved);reviews_snapshot=dict(run.reviews)
+        progress['saved_count']=len(saved_snapshot)
         progress['final_submitted']=run.state in ('submitted','graded')
         inventory = d._state.get('owned_exam_inventory') or {}
+        current=d._state.get('owned_exam_current') or {}
+        if not inventory and tuple(current.get('identity',{}).get(k) for k in ('courseId','classId','testPaperId','testUserRelationId'))==tuple(run.identity[1:]):
+            inventory={'title':current.get('title',''),'questions':current.get('questions',[])}
         entry=d._state.get('exam_entry_course')
         if run.state in ('submitted','graded') and entry and entry!=inventory.get('title'):
             result['progress']={'state':'exam_list','title':entry,'total':0,'saved_count':0,
@@ -172,19 +199,25 @@ def owned_exam_finish_status():
             return result
         rows = []
         for number, question in enumerate(inventory.get('questions', []), 1):
-            plan = run.reviews.get(question['fingerprint']) or {}
-            saved = run.saved.get(question['question_id']) or {}
+            plan = reviews_snapshot.get(question['fingerprint']) or {}
+            saved = saved_snapshot.get(question['question_id']) or {}
             review = plan.get('review') or {}
             rows.append({'number':number, 'question':question['question'],
                 'options':question['options'], 'answer':saved.get('answer') or plan.get('answer',''),
-                'status':'已暂存并回读' if saved else '审阅就绪' if plan else '待核验',
+                'status':('已暂存并回读' if run.state in ('review_complete','submitted','graded') else '已暂存，整卷待核对') if saved else '答案就绪' if plan else '待核验',
                 'basis':review.get('basis',''), 'sources':review.get('sources',[]),
                 'used_web_search':review.get('used_web_search',False)})
         progress['questions'] = rows
         progress['reviewed_count'] = sum(bool(row['answer']) for row in rows)
         progress['title'] = inventory.get('title','')
-        pending = next(((i, q) for i, q in enumerate(inventory.get('questions', []), 1)
-                        if q['question_id'] not in run.saved), None)
+        if current.get('title')==progress['title'] and not d._state.get('owned_exam_inventory'):
+            number=int(current.get('state',{}).get('start','0'))+1
+            if rows:rows[0]['number']=number
+            progress['next_question_number']=number
+            progress['next_question']=rows[0]['question'] if rows else ''
+        start_number=int(current.get('state',{}).get('start','0'))+1 if not d._state.get('owned_exam_inventory') else 1
+        pending = next(((i, q) for i, q in enumerate(inventory.get('questions', []), start_number)
+                        if q['question_id'] not in saved_snapshot), None)
         if pending:
             progress.update(next_question_number=pending[0], next_question=pending[1]['question'],
                             review_ready=pending[1]['fingerprint'] in run.reviews)

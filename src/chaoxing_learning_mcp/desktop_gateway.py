@@ -27,7 +27,7 @@ ROUTED = frozenset({'browser_status','inspect_current_task','observe_chapter_qui
     'refresh_owned_exam_adapter',
     'verify_owned_exam_saved_answer',
     'read_owned_browser_view','monitor_owned_video',
-    'open_account_browser','open_course_exam','enter_selected_exam','return_account_to_background',
+    'open_account_browser','open_course_exam','enter_selected_exam','return_account_to_background','close_account_workspace','configure_notification_interval',
     'learning_batch_status',
     'load_batch_implementation','start_learning_batch',
     'observe_video_question','read_owned_video_captions','select_course_card',
@@ -133,17 +133,21 @@ def desktop_account_tool(account_id: str, tool_name: str, arguments: dict | None
     if account_id not in tasks._accounts: raise ValueError('UNKNOWN_ACCOUNT')
     args = dict(arguments or {})
     if 'account_id' in args and args['account_id'] != account_id: raise ValueError('ACCOUNT_ID_MISMATCH')
-    if tool_name in ('smtp_notification_status','bind_account_notification_email'):
+    if tool_name in ('smtp_notification_status','bind_account_notification_email','configure_notification_interval'):
         args.setdefault('account_id',account_id)
     if tool_name=='list_courses':
         if args.get('account_ids') not in (None,[account_id]):raise ValueError('ACCOUNT_ID_MISMATCH')
         args['account_ids']=[account_id]
     if account_id in p._sessions or p._local_account == account_id:
-        return p.parallel_account_tool(account_id, tool_name, args)
+        result=p.parallel_account_tool(account_id, tool_name, args)
+        if tool_name=='configure_notification_interval' and result.get('configured'):
+            mail._notification_intervals[account_id]=result['notification_interval_minutes']*60
+        return result
     if tool_name == 'list_courses': return tasks.list_courses([account_id])
     if tool_name == 'smtp_notification_status': return mail.smtp_notification_status(account_id)
     if tool_name == 'bind_account_notification_email':
         return mail.bind_account_notification_email(account_id, args['recipient_email'])
+    if tool_name=='configure_notification_interval':return mail.configure_notification_interval(**args)
     if d._state.get('account_id') != account_id:
         raise ValueError('ACCOUNT_BROWSER_NOT_RUNNING')
     from . import batch_runner
@@ -205,6 +209,22 @@ def start_desktop_console(app_path: str, python_path: str = '', port: int = 8796
                 'port':http.server_address[1],'new_browser_started':False}
 
 
+def attach_local_console(port:int=0):
+    """Pair a standalone desktop to its own local backend without storing its secret."""
+    global _gateway
+    with _lock:
+        if _gateway is None:
+            class Handler(BaseHTTPRequestHandler):
+                def log_message(self,*args):pass
+                def do_POST(self):return _handle_post(self)
+            token=secrets.token_urlsafe(32)
+            http=ThreadingHTTPServer(('127.0.0.1',port),Handler);http.daemon_threads=True
+            _gateway=(http,token)
+            threading.Thread(target=http.serve_forever,daemon=True,name='desktop-gateway').start()
+        http,token=_gateway
+        return {'port':http.server_address[1],'token':token,'preferences':_preferences}
+
+
 
 def _handle_post(self):
     """Hot-replaceable authenticated RPC; preserve typed faults without secrets."""
@@ -228,6 +248,7 @@ def _handle_post(self):
             root=root.__cause__
         code=getattr(root,'code',None)
         from .parallel_runner import _WORKER_CODES
+        if code is None and str(root) in _WORKER_CODES:code=str(root)
         if code not in _WORKER_CODES:code='RPC_OPERATION_FAILED_OR_UNKNOWN'
         record={'at':time.time(),'tool':name,'operation':args.get('tool_name'),
                 'account':args.get('account_id'),'error_type':type(root).__name__,'error_code':code}

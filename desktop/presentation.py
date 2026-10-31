@@ -33,6 +33,21 @@ def clock(value):
     if not isinstance(value,(int,float)):return '—'
     value=max(0,int(value));return f'{value//60:02d}:{value%60:02d}'
 
+
+def media_caption(sample,progress=None):
+    progress=progress or {};count=progress.get('required_video_count',0)
+    prefix=''
+    if count>1:
+        current=progress.get('next_video_number')
+        prefix=(f'视频 {current}/{count}' if current else f'{count}个视频已确认完成')
+        if current:prefix+=f"（已确认 {progress.get('completed_video_count',0)}）"
+        prefix+=' · '
+    if not sample:return prefix+'待采样'
+    position=sample.get('current_time');duration=sample.get('duration')
+    position=f'{position:.0f}' if isinstance(position,(int,float)) else '—'
+    duration=f'{duration:.0f}' if isinstance(duration,(int,float)) else '—'
+    return prefix+f"{position} / {duration}s · {sample.get('playback_rate','—')}×"
+
 def readable_event(event):
     name=event.get('event','事件');result=event.get('result') or {}
     titles={'control_owned_video':'读取播放进度','observe_chapter_quiz':'读取章节测验','observe_video_question':'读取弹题',

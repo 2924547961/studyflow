@@ -26,3 +26,12 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+# Desktop and portable runtime
+
+StudyFlow is distributed under GPL-3.0-only; see LICENSE. The usage statement describes the intended use and does not add restrictions to the GPL. The corresponding StudyFlow source and build scripts accompany the same release.
+
+PyQt6 is GPLv3/commercial; this package uses the GPLv3 distribution. Qt libraries retain their upstream LGPL/GPL notices. See https://en.riverbankcomputing.com/software/pyqt and the bundled licenses directory.
+
+Dependency versions and upstream project/source locations are listed in licenses/dependencies.json in the portable package. Python, Playwright/Node.js, OpenSSL and all other dependencies retain their own licenses.

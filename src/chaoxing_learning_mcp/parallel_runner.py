@@ -32,6 +32,8 @@ _supervisor_tasks=set()
 _supervisor_wake=None
 
 REVIEW_TOOLS={
+    'configure_notification_interval',
+    'close_account_workspace',
     'refresh_owned_exam_adapter',
     'inspect_owned_rate_sources',
     'inspect_course_score_page',
@@ -54,6 +56,7 @@ REVIEW_TOOLS={
 
 
 _WORKER_CODES=('ACCOUNT_ALREADY_ACTIVE_IN_ANOTHER_PROCESS','ACCOUNT_IN_USE',
+               'EXAM_ACTIVE_KEEP_BROWSER','SUBMISSION_PENDING_KEEP_BROWSER','VERIFICATION_REQUIRED',
                'EXAM_PAGE_NOT_OPEN','EXAM_PAGE_AMBIGUOUS',
                'LOGIN_REJECTED','PENDING_SUBMISSION_OR_REVIEW','BROWSER_AUTHENTICATION_EXPIRED',
                'BROWSER_RECOVERY_STATE_INVALID','BROWSER_CLOSED','BROWSER_ACTION_TIMEOUT')
@@ -70,6 +73,8 @@ def _unpack(result):
         code=next((code for code in _WORKER_CODES if code in text),'WORKER_TOOL_FAILED')
         if code=='WORKER_TOOL_FAILED':
             for marker,known in (
+                ('Face verification required','VERIFICATION_REQUIRED'),
+                ('QR verification requires','VERIFICATION_REQUIRED'),
                 ('Browser authentication expired; repeat login explicitly','BROWSER_AUTHENTICATION_EXPIRED'),
                 ('IndexError: list index out of range','BROWSER_RECOVERY_STATE_INVALID'),
                 ('TargetClosedError:','BROWSER_CLOSED'),
@@ -90,6 +95,12 @@ def _unpack(result):
 
 def parallel_learning_status(account_id:str='', detail:bool=False) -> dict:
     """Cached account-specific status or compact all-account summary, never browser polling."""
+    if _local_account in _states:
+        from . import batch_runner,course_direct
+        if course_direct._state.get('account_id')==_local_account:
+            live=batch_runner.learning_batch_status()
+            if any(a.get('account_id')==_local_account for a in live.get('accounts',[])):
+                _store(_local_account,live)
     with _lock:
         values=copy.deepcopy(_states)
     if account_id:
@@ -205,6 +216,8 @@ async def _remote(record,path,rate):
                     await session.initialize()
                     async_lock=asyncio.Lock()
                     async def call(name,args):
+                        if name in ('learning_batch_status','smtp_notification_status') or name=='owned_exam_finish_status' and not args.get('refresh'):
+                            return _unpack(await session.call_tool(name,args,read_timeout_seconds=15))
                         async with async_lock:
                             return _unpack(await session.call_tool(name,args,read_timeout_seconds=120))
                     with _lock:_sessions[aid]=call
@@ -231,6 +244,8 @@ async def _remote(record,path,rate):
                         await call('start_learning_batch',{'accounts':[record],'state_path':str(path),'rate':rate,
                             **({'media_checkpoint':record['_media_checkpoint']} if '_media_checkpoint' in record else {})})
                     phase='polling'
+                    interval=mail.notification_interval_seconds(aid)
+                    if interval!=3600:await call('configure_notification_interval',{'account_id':aid,'minutes':interval//60})
                     while True:
                         state=await call('learning_batch_status',{})
                         if state.get('status')=='idle':
@@ -238,7 +253,7 @@ async def _remote(record,path,rate):
                         _store(aid,state)
                         # Completion ends course dispatch, not the account's
                         # interactive browser needed for subsequent exam work.
-                        if state.get('status') == 'stopped':return
+                        # Pausing the queue keeps its browser/session available for resume or exams.
                         await asyncio.sleep(5)
     except Exception as exc:
         def diagnostics(error):
@@ -265,6 +280,12 @@ def _queue_signature(record):
     from .batch_runner import normalized_name
     return tuple((normalized_name(c if isinstance(c,str) else c['name']),
                   '' if isinstance(c,str) else c.get('course_id','')) for c in record['courses'])
+
+def _queue_covered(requested,existing):
+    """A selected ordered subset reuses the retained queue; new courses still conflict."""
+    remaining=iter(_queue_signature(existing))
+    return all(any(name==old_name and (not cid or cid==old_id)
+                   for old_name,old_id in remaining) for name,cid in _queue_signature(requested))
 
 
 def start_account_workspace(account_id:str,browser_mode:str='minimized') -> dict:
@@ -345,7 +366,7 @@ def add_parallel_learning_accounts(accounts:list[dict], browser_mode:str='headle
                     _loop.call_soon_threadsafe(lambda fn=begin_queue:asyncio.create_task(fn()))
                     results.append(dict(account_id=aid,status='starting'))
                     continue
-                if _queue_signature(r)!=_queue_signature(_records[aid]):
+                if not _queue_covered(r,_records[aid]):
                     results.append(dict(account_id=aid,status='conflict',error_code='EXISTING_QUEUE_CONFLICT'))
                 else:
                     results.append(dict(account_id=aid,status='reused',worker_status=_states.get(aid,{}).get('status'),
@@ -402,6 +423,16 @@ async def _run_all(records,folder,rate):
         await _supervisor_wake.wait()
 
 
+async def _cached_status_call(call,name,args):
+    """Read process memory without queuing behind a long browser writer, including old workers."""
+    import inspect
+    try:session=inspect.getclosurevars(call).nonlocals.get('session')
+    except TypeError:session=None
+    if session is not None:
+        return _unpack(await session.call_tool(name,args,read_timeout_seconds=15))
+    return await call(name,args)
+
+
 def parallel_account_tool(account_id:str, tool_name:str, arguments:dict|None=None) -> dict:
     """Route a necessary review/readback to the correct account's existing MCP worker.
 
@@ -428,7 +459,9 @@ def parallel_account_tool(account_id:str, tool_name:str, arguments:dict|None=Non
         return {'ok':False,'account_id':account_id,'error_code':
                 'ACCOUNT_NOT_REGISTERED' if account_id not in _records else 'WORKER_NOT_CONNECTED',
                 'next_action':'add_parallel_learning_accounts' if account_id not in _records else 'inspect_parallel_account_status'}
-    future=asyncio.run_coroutine_threadsafe(call(tool_name,arguments),_loop)
+    cached=tool_name in ('learning_batch_status','smtp_notification_status') or tool_name=='owned_exam_finish_status' and not arguments.get('refresh')
+    operation=_cached_status_call(call,tool_name,arguments) if cached else call(tool_name,arguments)
+    future=asyncio.run_coroutine_threadsafe(operation,_loop)
     # Timeout does not cancel/replay an in-flight account action.
     try:return future.result(timeout=125)
     except TimeoutError:raise ValueError('Account action result pending; inspect before any retry') from None

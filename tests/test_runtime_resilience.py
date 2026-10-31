@@ -18,6 +18,18 @@ def test_resume_restarts_only_dead_dispatcher_and_preserves_plan(monkeypatch):
     assert b.resume_learning_batch()['status']=='running'
     fresh.start.assert_called_once();assert b._plan is plan
 
+def test_stopped_retained_queue_can_resume_and_running_resume_is_idempotent(monkeypatch):
+    state={'status':'stopped'};thread=Mock();thread.is_alive.return_value=False
+    fresh=Mock();fresh.is_alive.return_value=True;factory=Mock(return_value=fresh)
+    monkeypatch.setattr(b,'_state',state);monkeypatch.setattr(b,'_thread',thread)
+    monkeypatch.setattr(b,'_plan',[{'account_id':'demo','courses':['course']}])
+    monkeypatch.setattr(b,'_save',lambda:None);monkeypatch.setattr(b,'learning_batch_status',lambda:dict(state))
+    monkeypatch.setattr(b.threading,'Thread',factory)
+    monkeypatch.setattr(d,'_state',{});monkeypatch.setattr(d.course_extension,'_pending',None)
+    assert b.resume_learning_batch()['status']=='running'
+    assert b.resume_learning_batch()['status']=='running'
+    factory.assert_called_once();fresh.start.assert_called_once()
+
 @pytest.mark.parametrize('text',['Verification state cannot be established from empty frames',
     'Frame was detached','Execution context was destroyed','Expected exactly one current video'])
 def test_transient_read_backoff_is_bounded(text):

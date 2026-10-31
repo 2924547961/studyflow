@@ -1046,6 +1046,102 @@ def open_course_chapter(chapter_id: str) -> dict[str, Any]:
     return inspect_owned_page()
 
 
+def inspect_owned_media_tasks():
+    """Read per-video DOM containers and samples; never play, seek or report progress."""
+    import json
+    def inspect():
+        page=_require_page();_check_gates(page);items=[]
+        for index,frame in enumerate(_video_frames_in_dom_order(page),1):
+            marker=frame.frame_element().evaluate("e=>{const a=e.closest('.ans-attach-ct');return {container:a?.className||null,finished:a?.classList.contains('ans-job-finished')??null,ancestors:[e,e.parentElement,e.parentElement?.parentElement].filter(Boolean).map(n=>n.className),data:e.getAttribute('data')}}")
+            marker=marker or {}
+            data=marker.pop('data',None)
+            if data:
+                try:
+                    props=json.loads(data)
+                    marker['attachment_keys']=sorted(props)
+                    marker['required_task']=bool(props.get('_jobid') or props.get('jobid'))
+                    marker['object_fingerprint']=hashlib.sha256(str(props.get('objectid','')).encode()).hexdigest()
+                    if marker['required_task'] and props.get('objectid'):
+                        marker['task_fingerprint']=hashlib.sha256(json.dumps([props['objectid'],props.get('_jobid') or props.get('jobid')]).encode()).hexdigest()
+                except ValueError:marker['attachment_layout']='unparsed'
+            items.append({'number':index,'container':marker,'sample':_watch_sample(frame)})
+        required=[x for x in items if x['container'].get('required_task')]
+        completed=sum(x['container'].get('finished') is True for x in required)
+        return {'tasks':items,'required_video_count':len(required),'completed_video_count':completed,
+                'all_required_completed':bool(required) and completed==len(required),
+                'next_video_number':next((i for i,x in enumerate(required,1) if x['container'].get('finished') is not True),None),
+                'platform_write':False}
+    return _run(inspect)
+
+
+def _video_frames_in_dom_order(page):
+    frames=[f for f in page.frames if not f.is_detached() and f.locator('video').count()]
+    if not frames or any(f.locator('video').count()!=1 for f in frames):
+        raise ValueError('Expected individually identifiable video frames')
+    if len(frames)>1:
+        def position(frame):
+            path=[]
+            while frame.parent_frame is not None:
+                path.insert(0,tuple(frame.frame_element().evaluate("e=>{const p=[];for(let n=e;n.parentElement;n=n.parentElement)p.unshift(Array.prototype.indexOf.call(n.parentElement.children,n));return p}")))
+                frame=frame.parent_frame
+            return tuple(path)
+        frames.sort(key=position)
+    return frames
+
+
+def _ordered_video_frame(page):
+    import json
+    frames=_video_frames_in_dom_order(page)
+    if len(frames)==1:return frames[0]
+    pending=[];required=[];identities=set()
+    for frame in frames:
+        marker=frame.frame_element().evaluate("e=>{const a=e.closest('.ans-attach-ct');return a?{finished:a.classList.contains('ans-job-finished'),data:e.getAttribute('data')}:null}")
+        if marker is None:raise ValueError('Multiple videos lack individual task containers')
+        try:props=json.loads(marker.get('data') or '{}')
+        except ValueError:raise ValueError('Video attachment identity cannot be parsed') from None
+        identity=(props.get('objectid'),props.get('_jobid') or props.get('jobid'))
+        if not identity[1]:continue
+        if not identity[0] or identity in identities:raise ValueError('Video task identity missing or duplicated')
+        identities.add(identity);required.append(frame)
+        if not marker['finished']:pending.append(frame)
+    if not required:raise ValueError('Multiple videos have no identifiable required tasks')
+    return pending[0] if pending else required[0]
+
+
+def _video_frame_finished(page,frame):
+    """A sibling video's completion never completes the watched video."""
+    marker=frame.frame_element().evaluate("e=>{const a=e.closest('.ans-attach-ct');return a?{finished:a.classList.contains('ans-job-finished')}:null}")
+    if marker is not None:return marker['finished'] is True
+    frames=[f for f in page.frames if not f.is_detached() and f.locator('video').count()]
+    return len(frames)==1 and any(f.locator('.ans-attach-ct.videoContainer.ans-job-finished').count()
+                                 for f in page.frames if not f.is_detached())
+
+
+def _player_script_for_frame(cdp,scripts,frame):
+    """Resolve duplicate player URLs by the selected iframe's task identity."""
+    targets=[s for s in scripts if '/videojs-ext/videojs-ext.min.js' in s.get('url','')]
+    if not targets:
+        from .runtime_resilience import LoadingTransient
+        raise LoadingTransient('Player adapter script still loading')
+    if len(targets)==1:return targets[0]
+    import json
+    def identity(data):
+        props=json.loads(data or '{}')
+        return props.get('objectid'),props.get('_jobid') or props.get('jobid')
+    expected=identity(frame.frame_element().get_attribute('data'))
+    if not all(expected):raise ValueError('Selected video task identity missing')
+    matches=[]
+    for script in targets:
+        frame_id=(script.get('executionContextAuxData') or {}).get('frameId')
+        if not frame_id:continue
+        owner=cdp.send('DOM.getFrameOwner',{'frameId':frame_id})
+        node=cdp.send('DOM.describeNode',{'backendNodeId':owner['backendNodeId']})['node']
+        attrs=node.get('attributes',[]);attrs=dict(zip(attrs[::2],attrs[1::2]))
+        if identity(attrs.get('data'))==expected:matches.append(script)
+    if len(matches)!=1:raise ValueError('Player script task identity ambiguous')
+    return matches[0]
+
+
 @_serialized
 def control_owned_video(action: str = "inspect", bring_to_front: bool = False,
                         rate: float = 1.25, minimize: bool = True,
@@ -1063,24 +1159,26 @@ def control_owned_video(action: str = "inspect", bring_to_front: bool = False,
             if len(current)==1 and re.search('测验|测试|练习',current[0].get('text','')):
                 return {'status':'review_required','error_code':'QUIZ_CARD_IS_ACTIVE',
                         'next_action':'observe_chapter_quiz','platform_write':False}
-        frames = [f for f in page.frames if not f.is_detached() and f.locator('video').count()]
-        if len(frames) != 1 or frames[0].locator('video').count() != 1:
-            raise ValueError("Expected exactly one current video; inspect cards/frames first")
-        frame = frames[0]
+        frame = _ordered_video_frame(page)
         video = frame.locator('video')
         def sample():
             return video.evaluate('v => ({current_time:v.currentTime,duration:Number.isFinite(v.duration)?v.duration:null,decoded_frames:v.getVideoPlaybackQuality().totalVideoFrames,paused:v.paused,ended:v.ended,muted:v.muted,playback_rate:v.playbackRate})')
         before = sample()
+        if action=='play' and _video_frame_finished(page,frame):
+            return {'status':'already_completed','sample':before,'platform_write':False,
+                    'next_action':'Confirm directory and inspect the next task card; do not replay completed video'}
         if action=='play' and before.get('ended') and not allow_completed_replay:
             return {'status':'ended_needs_confirmation','sample':before,'platform_write':False,
                     'next_action':'Confirm task marker/directory; never restart an ended video'}
-        if action=='play' and any(
-                f.locator('.ans-attach-ct.videoContainer.ans-job-finished').count()
-                for f in page.frames if not f.is_detached()):
-            return {'status':'already_completed','sample':before,'platform_write':False,
-                    'next_action':'Confirm directory and inspect the next task card; do not replay completed video'}
         if action == 'play':
             _arm_video_delivery(page)
+            for sibling in _video_frames_in_dom_order(page):
+                if sibling==frame:continue
+                other=_watch_sample(sibling)
+                if not other['paused'] and not other['ended']:
+                    sibling.locator('.vjs-play-control').click(timeout=6000)
+                    if not _watch_sample(sibling)['paused']:
+                        raise ValueError('Sibling video did not pause; sequential playback retained')
             if frame.locator('.ans-videoquiz:visible').count():
                 raise ValueError('Visible video question requires review; use observe_video_question')
             if bring_to_front and not _state.get('headless', True):
@@ -1147,15 +1245,14 @@ def control_owned_video(action: str = "inspect", bring_to_front: bool = False,
                 result['rate_result'] = {'changed':False, 'error_type':type(exc).__name__,'reason':str(exc)[:240]}
         if minimize and not _state.get('headless', True):
             result['window'] = ({'kept_visible':True} if _state.get('keep_window_visible') else minimize_owned_window.__wrapped__())
-        result['sample'] = _run(lambda: _watch_sample(next(f for f in _state['page'].frames
-            if not f.is_detached() and f.locator('video').count() == 1)))
+        result['sample'] = _run(lambda: _watch_sample(_ordered_video_frame(_state['page'])))
         if result['sample']['playback_rate']!=rate:
             paused=control_owned_video.__wrapped__('pause')
             result.update(status='rate_not_applied',requested_rate=rate,sample=paused['sample'],
                           error_code='REQUESTED_PLAYBACK_RATE_NOT_APPLIED',automatic_fallback=False)
             _state.get('video_watch',{}).update(enabled=False,status='blocked',error='REQUESTED_PLAYBACK_RATE_NOT_APPLIED')
             return result
-    if action == 'play' and not _state.get('video_watch', {}).get('enabled'):
+    if action == 'play':
         monitor_owned_video('start')
     return result
 
@@ -1713,6 +1810,37 @@ def open_account_browser(show_window:bool=True, closed_only:bool=False) -> dict[
 
 
 @_serialized
+def close_account_workspace() -> dict[str,Any]:
+    """Pause this account and close its browser only after preserving exam/write guards."""
+    from . import batch_runner
+    from .owned_exam import _driver
+    from .browser_recovery import observe_submitted_receipt
+    account=_state.get('account_id')
+    if _state.get('submit_attempted') or course_extension._pending:
+        return {'ok':False,'error_code':'SUBMISSION_PENDING_KEEP_BROWSER','browser_closed':False}
+    attempts=_state.get('video_question_attempts',{}).values()
+    if any(x=='outcome_unknown' or isinstance(x,dict) and x.get('correct') is None for x in attempts):
+        return {'ok':False,'error_code':'SUBMISSION_PENDING_KEEP_BROWSER','browser_closed':False}
+    if _state.get('browser') is None:
+        return {'ok':True,'account_id':account,'browser_closed':True,'already_closed':True}
+    def check():
+        try:driver=_driver()
+        except ValueError as exc:
+            if str(exc)!='EXAM_PAGE_NOT_OPEN':raise
+            return
+        observe_submitted_receipt(_state)
+        if driver.run.state not in ('graded','submitted'):
+            raise ValueError('EXAM_ACTIVE_KEEP_BROWSER')
+    try:_run(check)
+    except ValueError as exc:
+        return {'ok':False,'error_code':str(exc) if str(exc) in ('EXAM_ACTIVE_KEEP_BROWSER','EXAM_PAGE_AMBIGUOUS') else 'SUBMISSION_PENDING_KEEP_BROWSER','browser_closed':False}
+    batch_runner.stop_learning_batch()
+    stop_course_browser.__wrapped__()
+    _state['account_id']=account  # retain routing; restart reuses in-memory login
+    return {'ok':True,'account_id':account,'browser_closed':True,'queue_paused':True,'credentials_storage':'memory only'}
+
+
+@_serialized
 def return_account_to_background() -> dict[str,Any]:
     """After manual work, return this account to headless course dispatch."""
     from .browser_handoff import switch
@@ -1759,10 +1887,7 @@ def set_owned_video_rate(rate: float = 1.25, native_html5: bool = False) -> dict
     page = _require_page()
     def select():
         _check_gates(page)
-        frames = [f for f in page.frames if not f.is_detached() and f.locator('video').count()]
-        if len(frames) != 1:
-            raise ValueError("Expected one video")
-        frame = frames[0]
+        frame = _ordered_video_frame(page)
         if native_html5:
             video = frame.locator('video')
             before = video.evaluate('v => ({rate:v.playbackRate,time:v.currentTime})')
@@ -1843,10 +1968,7 @@ def apply_owned_rate_debug_test(rate: float = 1.25) -> dict[str, Any]:
     page = _require_page()
     def apply():
         _check_gates(page)
-        frames = [f for f in page.frames if not f.is_detached() and f.locator('video').count()]
-        if len(frames) != 1:
-            raise ValueError("Expected one video")
-        frame = frames[0]
+        frame = _ordered_video_frame(page)
         video = frame.locator('video')
         cdp = page.context.new_cdp_session(page)
         scripts = []
@@ -1881,13 +2003,7 @@ def apply_owned_rate_debug_test(rate: float = 1.25) -> dict[str, Any]:
         try:
             cdp.send('Debugger.enable')
             page.wait_for_timeout(100)
-            targets = [s for s in scripts if '/videojs-ext/videojs-ext.min.js' in s.get('url', '')]
-            if not targets:
-                from .runtime_resilience import LoadingTransient
-                raise LoadingTransient('Player adapter script still loading')
-            if len(targets) != 1:
-                raise ValueError('Player script identity ambiguous')
-            target = targets[0]
+            target = _player_script_for_frame(cdp,scripts,frame)
             source = cdp.send('Debugger.getScriptSource', {'scriptId':target['scriptId']})['scriptSource']
             needle,ceiling_name = _inspected_rate_signature(source)
             offset = source.index(needle)
@@ -1998,8 +2114,7 @@ def _watch_tick():
             clear(w)
         if advanced and w.get('last_event') in ('waiting','stalled'):
             w['last_event']='progress_observed'
-        finished_marker=any(f.locator('.ans-attach-ct.videoContainer.ans-job-finished').count()
-                            for f in page.frames if not f.is_detached())
+        finished_marker=_video_frame_finished(page,frame)
         # Platform completion wins over a leftover popup from the bounded replay.
         if finished_marker:
             w.update(enabled=False,status='ended_needs_task_confirmation');return
@@ -2095,16 +2210,17 @@ def monitor_owned_video(action: str = 'start') -> dict[str, Any]:
         elif action == 'start':
             page = _require_page()
             _check_gates(page)
-            frames = [f for f in page.frames if not f.is_detached() and f.locator('video').count() == 1]
-            if len(frames) != 1:
-                raise ValueError('Expected exactly one video frame')
-            frame = frames[0]
+            frame = _ordered_video_frame(page)
             old = _state.get('video_watch', {})
             if not (old.get('enabled') and old.get('frame') == frame and old.get('page_url') == page.url):
                 sample = _watch_sample(frame)
                 _state['video_watch'] = dict(enabled=True, status='armed', frame=frame,
                     page_url=page.url, sample=sample, sample_observed_monotonic=time.monotonic(),resumes=0,
                     due=time.monotonic()+(1 if sample['paused'] else _watch_delay(sample)))
+            if len(_video_frames_in_dom_order(page))>1:
+                inventory=inspect_owned_media_tasks()
+                _state['video_watch']['media_progress']={k:inventory[k] for k in
+                    ('required_video_count','completed_video_count','next_video_number')}
             if not _state.get('watch_binding_page') is page:
                 def event(source, kind):
                     w = _state.get('video_watch', {})
@@ -2376,8 +2492,9 @@ def _arm_video_delivery(page):
 
 
 @_serialized
-def inspect_owned_video_delivery(refresh_task_metadata:bool=False, capture_media_events:bool=False) -> dict[str,Any]:
+def inspect_owned_video_delivery(refresh_task_metadata:bool=False, capture_media_events:bool=False,read_task_inventory:bool=False) -> dict[str,Any]:
     """Passively observe actual player report responses; never send/alter reports."""
+    if read_task_inventory:return inspect_owned_media_tasks()
     page=_require_page()
     def inspect():
         _check_gates(page)
@@ -2756,7 +2873,7 @@ def enter_selected_exam(course_name:str) -> dict[str,Any]:
         return {'clicked':True,'course':course_name,'verification_not_bypassed':True}
     return _run(enter)
 
-TOOLS=(*TOOLS,open_course_exam,enter_selected_exam)
+TOOLS=(*TOOLS,open_course_exam,enter_selected_exam,close_account_workspace)
 
 _reported_quizzes=globals().get('_reported_quizzes',set())
 def _report_quiz(url, result, submitted=False):

@@ -16,6 +16,16 @@ class Reporter:
             if account not in self.runs or not self.runs[account]['active']:
                 self.runs[account]=dict(run_id=uuid4().hex, start=self.clock(),
                     next_index=0, active=True, events=[], seen=set(), notices={})
+                from .smtp_notifications import notification_interval_seconds
+                interval=notification_interval_seconds(account)
+                self.runs[account].update(interval_seconds=interval,window_start=self.clock(),next_due=self.clock()+interval)
+
+    def set_interval(self,account,seconds):
+        with self.lock:
+            run=self.runs.get(account)
+            if run:
+                run.setdefault('window_start',run['start']+run['next_index']*3600)
+                run.update(interval_seconds=seconds,next_due=self.clock()+seconds)
 
     def record(self, account, key, kind, title, score=None, maximum=None, question_results=None):
         with self.lock:
@@ -26,7 +36,7 @@ class Reporter:
                 if score is not None:
                     for e in run['events']:
                         if e['key']==key and e['score'] is None:
-                            if int((e['at']-run['start'])//3600)<run['next_index']:
+                            if e['at']<run.get('window_start',run['start']+run['next_index']*3600):
                                 run['events'].append(dict(key=('grading',key),kind='quiz',title=e['title'],
                                     at=self.clock(),score=score,maximum=maximum,question_results=question_results))
                             e.update(score=score, maximum=maximum, question_results=question_results)
@@ -46,9 +56,11 @@ class Reporter:
         with self.lock:
             now=self.clock()
             for account, run in self.runs.items():
-                while run['active'] and now >= run['start']+(run['next_index']+1)*3600:
+                while run['active'] and now >= run.get('next_due',run['start']+(run['next_index']+1)*3600):
                     i=run['next_index']; run['next_index']+=1
-                    lo=run['start']+i*3600; hi=lo+3600
+                    lo=run.get('window_start',run['start']+i*3600)
+                    hi=run.get('next_due',lo+3600)
+                    run.update(window_start=hi,next_due=hi+run.get('interval_seconds',3600))
                     rows=[dict(e) for e in run['events'] if lo<=e['at']<hi]
                     run['notices'][i]='sending'
                     jobs.append((account,run,i,lo,hi,rows))
@@ -63,7 +75,7 @@ class Reporter:
                     lines.append('章节测验：'+e['title']+'；得分：'+score)
                     for q in e.get('question_results') or []:
                         lines.append(f"  第 {q['number']} 题：{q['score']} 分")
-            if not rows: lines.append('这一小时暂无新确认完成的视频或章节测验。')
+            if not rows: lines.append('这一时段暂无新确认完成的视频或章节测验。')
             lines.append('仅统计本批次实际学习后的平台确认记录；SMTP 接受不代表收件箱送达。')
             try: status=self.send(account, '\n'.join(lines))
             except Exception: status='send_failed_or_unknown_no_replay'
@@ -73,7 +85,8 @@ class Reporter:
         with self.lock:
             r=self.runs.get(account)
             return dict(active=r['active'],started_at=r['start'],run_id=r['run_id'],
-                intervals=dict(r['notices'])) if r else dict(active=False)
+                intervals=dict(r['notices']),interval_minutes=r.get('interval_seconds',3600)//60,
+                next_report_at=r.get('next_due')) if r else dict(active=False)
 
 def _send(account, body):
     from . import smtp_notifications as n
@@ -102,7 +115,7 @@ def _loop():
     while True:
         reporter.tick()
         with reporter.lock:
-            due=[r['start']+(r['next_index']+1)*3600 for r in reporter.runs.values() if r['active']]
+            due=[r.get('next_due',r['start']+(r['next_index']+1)*3600) for r in reporter.runs.values() if r['active']]
         _wake.wait(max(0.1,min(due)-time.time()) if due else 3600)
         _wake.clear()
 

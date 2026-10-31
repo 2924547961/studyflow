@@ -3,6 +3,29 @@ import copy
 from types import SimpleNamespace
 from unittest.mock import Mock
 import pytest
+
+def test_selected_remaining_subset_is_covered_without_replacing_queue():
+    from chaoxing_learning_mcp.parallel_runner import _queue_covered
+    old={'courses':['completed','remaining','last']}
+    assert _queue_covered({'courses':['remaining']},old)
+    assert _queue_covered({'courses':['remaining','last']},old)
+    assert not _queue_covered({'courses':['new']},old)
+    assert not _queue_covered({'courses':['last','remaining']},old)
+
+
+def test_cached_status_is_not_blocked_by_existing_worker_browser_lock():
+    async def scenario():
+        lock=asyncio.Lock()
+        class Session:
+            async def call_tool(self,*args,**kwargs):
+                return SimpleNamespace(structured_content={'fresh':True},is_error=False)
+        session=Session()
+        async def existing_call(name,args):
+            async with lock:return await session.call_tool(name,args)
+        async with lock:
+            result=await asyncio.wait_for(p._cached_status_call(existing_call,'owned_exam_finish_status',{}),.5)
+        assert result=={'fresh':True}
+    asyncio.run(scenario())
 from chaoxing_learning_mcp import parallel_runner as p, course_tasks as t, batch_runner as b, course_direct as d
 
 @pytest.fixture(autouse=True)

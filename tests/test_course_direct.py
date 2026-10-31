@@ -346,6 +346,7 @@ def test_watch_popup_does_not_resume(monkeypatch):
     page.frames=[]
     page.is_closed.return_value = False
     page.url = 'course'
+    frame.frame_element.return_value.evaluate.return_value=None
     frame.is_detached.return_value = False
     frame.locator.return_value.count.return_value = 1
     direct._state.update(page=page, video_watch=dict(enabled=True,due=0,frame=frame,page_url='course',resumes=0))
@@ -364,6 +365,7 @@ def test_answered_watch_rechecks_infinite_wait_without_bypassing_popup(monkeypat
     page.url = 'course'
     page.is_closed.return_value = False
     page.frames = []
+    frame.frame_element.return_value.evaluate.return_value=None
     frame.is_detached.return_value = False
     frame.locator.return_value.count.return_value = int(popup)
     direct._state.update(page=page, video_watch=dict(enabled=True, due=float('inf'),
@@ -405,6 +407,7 @@ def test_watch_resumes_normal_pause_after_many_previous_resumes(monkeypatch):
     page.is_closed.return_value = False
     page.url = 'course'
     page.frames=[frame]
+    frame.frame_element.return_value.evaluate.return_value=None
     frame.is_detached.return_value = False
     frame.locator.return_value.count.return_value = 0
     direct._state.update(page=page, video_watch=dict(enabled=True,due=0,frame=frame,page_url='course',resumes=100))
@@ -526,6 +529,7 @@ def test_headless_window_status_does_not_request_a_window(monkeypatch):
 def test_platform_finished_marker_stops_watch_without_replaying(monkeypatch):
     page,frame=Mock(),Mock()
     page.url='course';page.is_closed.return_value=False;page.frames=[frame]
+    frame.frame_element.return_value.evaluate.return_value=None
     frame.is_detached.return_value=False
     frame.locator.side_effect=lambda selector:SimpleNamespace(count=lambda:0 if 'ans-videoquiz' in selector else 1)
     direct._state.update(page=page,video_watch=dict(enabled=True,due=0,frame=frame,page_url='course',resumes=0))
@@ -556,6 +560,7 @@ def test_platform_finished_marker_wins_over_replay_popup(monkeypatch):
     page,frame=Mock(),Mock();page.url='course';page.is_closed.return_value=False
     page.frames=[frame];frame.is_detached.return_value=False
     frame.locator.return_value.count.return_value=1
+    frame.frame_element.return_value.evaluate.return_value=None
     monkeypatch.setattr(direct,'_state',{'page':page,'video_watch':dict(enabled=True,due=0,frame=frame,page_url='course',resumes=0)})
     monkeypatch.setattr(direct,'_read_live_sample',lambda:None)
     monkeypatch.setattr(direct,'_check_gates',lambda p:None)

@@ -26,6 +26,8 @@ _playback_events = {}
 _playback_jobs = queue.Queue(maxsize=32)
 _playback_worker = None
 _mail_history = globals().get('_mail_history',{})
+_notification_intervals=globals().get('_notification_intervals',{})
+_notification_timers=globals().get('_notification_timers',{})
 _EMAIL = re.compile(r'[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+')
 
 
@@ -43,6 +45,35 @@ def _resolved_config(account_id):
     if _shared_sender and account_id in _recipients:
         return {**_shared_sender,'recipient':_recipients[account_id]}
     return None
+
+
+def notification_interval_seconds(account_id):
+    return _notification_intervals.get(account_id,3600)
+
+
+def _arm_interval_timer(account_id):
+    """Also wake legacy live report loops without restarting them or losing windows."""
+    from . import hourly_reports
+    previous=_notification_timers.pop(account_id,None)
+    if previous:previous.cancel()
+    status=hourly_reports.reporter.status(account_id)
+    if not status.get('active') or not status.get('next_report_at'):return
+    def due():
+        hourly_reports.reporter.tick();_arm_interval_timer(account_id)
+    timer=threading.Timer(max(.1,status['next_report_at']-time.time()),due);timer.daemon=True
+    _notification_timers[account_id]=timer;timer.start()
+
+
+def configure_notification_interval(account_id:str,minutes:int=60):
+    from .course_tasks import _accounts
+    from . import hourly_reports
+    if account_id not in _accounts:raise ValueError('Unknown learning account')
+    if isinstance(minutes,bool) or not isinstance(minutes,int) or not 1<=minutes<=1440:
+        raise ValueError('Notification interval must be 1..1440 minutes')
+    with _lock:_notification_intervals[account_id]=minutes*60
+    hourly_reports.reporter.set_interval(account_id,minutes*60);hourly_reports._wake.set()
+    _arm_interval_timer(account_id)
+    return {'configured':True,'account_id':account_id,'notification_interval_minutes':minutes,'mail_sent':False}
 
 
 def configure_smtp_sender(sender_email: str = '', smtp_auth_code: str = '', enabled: bool = True) -> dict[str, Any]:
@@ -117,12 +148,18 @@ def smtp_notification_status(account_id: str) -> dict[str, Any]:
                 'playback_started_notice':dict(_playback_events.get(account_id,{})),
                 'hourly_reports':report_status,'stage_notice':stage_status,
                 'mail_history':[dict(x) for x in _mail_history.get(account_id,[])],
-                'minimum_mail_interval_seconds':3600,
+                'minimum_mail_interval_seconds':notification_interval_seconds(account_id),
+                'notification_interval_minutes':notification_interval_seconds(account_id)//60,
                 'face_qr_expiry_exception':True,'storage':'process memory only'}
 
 
 def forget(account_ids=None):
     with _lock:
+        for key in list(_notification_intervals):
+            if account_ids is None or key in account_ids:_notification_intervals.pop(key,None)
+        for key in list(_notification_timers):
+            if account_ids is None or key in account_ids:
+                _notification_timers.pop(key).cancel()
         for key in list(_configs):
             if account_ids is None or key in account_ids: _configs.pop(key,None)
         for key in list(_recipients):
@@ -151,12 +188,14 @@ def _send(cfg, account_id, kind, png, body=None, *, verification_exception=None)
     if exempt and capture and time.time()-capture['captured_at']>30:
         with _lock:event.update(resend_requested=True,manual_refresh_started=False,manual_refresh_done=False)
         return 'stale_qr_capture_not_sent'
-    retry_after=0 if exempt else reserve(account_id,cfg['recipient'],previous)
+    interval=notification_interval_seconds(account_id)
+    retry_after=0 if exempt else reserve(account_id,cfg['recipient'],previous,**({'interval':interval} if interval!=3600 else {}))
     if retry_after:return 'rate_limited_hourly'
     msg=EmailMessage()
     msg['From']=cfg['sender'];msg['To']=cfg['recipient']
     if kind in ('hourly_report','hourly_report_test','stage_report'):
         msg['Subject']=('StudyFlow：小时学习汇总测试' if kind.endswith('_test') else 'StudyFlow：阶段学习进度与测验得分' if kind=='stage_report' else 'StudyFlow：每小时学习汇总')
+        if kind=='hourly_report' and interval!=3600:msg.replace_header('Subject',f'StudyFlow：学习进度汇总（{interval//60}分钟）')
         msg.set_content(body or '本小时暂无新确认记录。')
     elif kind == 'playback_started':
         msg['Subject']='StudyFlow：课程已开始实际播放'
@@ -430,7 +469,7 @@ def send_notification_test(account_id: str) -> dict[str, Any]:
         return {'account_id':account_id,'status':'send_failed_or_unknown_no_replay','error_type':type(exc).__name__}
 
 
-TOOLS=(send_notification_test,configure_smtp_sender,bind_account_notification_email,configure_smtp_notifications,smtp_notification_status)
+TOOLS=(send_notification_test,configure_smtp_sender,bind_account_notification_email,configure_smtp_notifications,smtp_notification_status,configure_notification_interval)
 
 
 def observe_playback_started(account_id,generation,previous,current):

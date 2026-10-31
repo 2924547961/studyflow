@@ -14,3 +14,7 @@ work/
 *.jpg
 *.zip
 !docs/images/*.png
+
+dist/
+build/
+*.spec

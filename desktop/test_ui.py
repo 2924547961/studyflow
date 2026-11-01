@@ -11,6 +11,23 @@ from theme import STYLE
 
 
 class UITests(unittest.TestCase):
+    def test_delayed_recovery_for_stopped_account_does_not_start_browser_or_queue(self):
+        w=Window();w.timer.stop();w.task=Mock();w.adapter=Mock()
+        w.adapter.route.return_value={'state':'not_started'}
+        result=w.auto_repair('fixture')
+        self.assertFalse(result['resumed'])
+        w.adapter.route.assert_called_once_with('fixture','runtime_health')
+        w.close()
+
+    def test_recovered_transport_fault_is_not_left_active_and_unknown_video_is_not_resumed(self):
+        w=Window();w.timer.stop();w.adapter=Mock();w.task=Mock()
+        w.last_errors={'审阅 fixture':'RPC_OPERATION_FAILED_OR_UNKNOWN','审阅 other':'NEEDS_EVIDENCE_OR_REVIEW'}
+        w.done('自动故障处理:fixture',{'resumed':True})
+        self.assertNotIn('审阅 fixture',w.last_errors)
+        self.assertIn('审阅 other',w.last_errors)
+        result=w.resume_observed_task('fixture',{'task_state':'video','video_result_unknown':True})
+        self.assertFalse(result['resumed']);w.adapter.route.assert_not_called()
+        w.close()
     def test_confirmed_review_allows_next_popup_without_observing_running_between(self):
         w=Window();w.timer.stop();w.task=Mock()
         w.auto_attempts={('fixture','chapter'),('other','chapter')}

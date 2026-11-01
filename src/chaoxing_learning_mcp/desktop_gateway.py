@@ -177,6 +177,9 @@ def desktop_account_tool(account_id: str, tool_name: str, arguments: dict | None
     if tool_name=='browser_status' and d._state.get('account_id')!=account_id:
         return {'account_id':account_id,'running':False,'worker_failed':False,
                 'generation':None,'state':'not_started','submit_attempted':False}
+    if tool_name=='runtime_health' and d._state.get('account_id')!=account_id:
+        return {'account_id':account_id,'state':'not_started','browser_generation':None,
+                'browser_worker_failed':False,'browser_polled':False,'credentials_read':False}
     if d._state.get('account_id') != account_id:
         raise ValueError('ACCOUNT_BROWSER_NOT_RUNNING')
     from . import batch_runner

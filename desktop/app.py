@@ -281,6 +281,8 @@ class Window(QMainWindow):
                 self.done('提交回读恢复:'+aid,data)
             if data.get('resumed'):
                 for old in ('媒体采样 '+aid,'浏览器状态:'+aid,'自动目录复核 '+aid):self.last_errors.pop(old,None)
+                if self.last_errors.get('审阅 '+aid) in ('RPC_OPERATION_FAILED_OR_UNKNOWN','CONNECTION_OR_RESULT_UNKNOWN','STATUS_CONNECTION_RETRY_PENDING'):
+                    self.last_errors.pop('审阅 '+aid,None)
                 self.auto_attempts={item for item in self.auto_attempts if item[0]!=aid}
             self.help_recovery.appendPlainText(aid+'：'+str(data.get('message') or data.get('reason') or data.get('status','已检查')))
             self.append_audit({'account':aid,'event':'自动故障处理','result':data,'automatic_resubmit':False})
@@ -474,6 +476,8 @@ class Window(QMainWindow):
         self.update_actions()
     def auto_repair(self,aid):
         health=self.adapter.route(aid,'runtime_health')
+        if health.get('state')=='not_started':
+            return {'message':'账号浏览器尚未启动或已结束，无需恢复；保留原队列记录。','resumed':False}
         if health.get('unknown_submission'):
             result=self.adapter.route(aid,'recover_chapter_submission_readback')
             result['recovery_kind']='submission_readback'
@@ -502,6 +506,8 @@ class Window(QMainWindow):
         task=self.adapter.route(aid,'inspect_current_task')
         return self.resume_observed_task(aid,task)
     def resume_observed_task(self,aid,task):
+        if task.get('video_result_unknown'):
+            return {'message':'原弹题结果待核验，保留记录；不重放提交。','resumed':False}
         kind=task.get('task_state')
         if kind not in ('video','video_completed','video_question_review','chapter_quiz_review'):
             return {'message':'等待任务界面就绪；保留当前页面。','resumed':False}

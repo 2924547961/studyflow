@@ -20,6 +20,21 @@ class Adapter:
         return {}
 
 class DesktopTests(unittest.TestCase):
+    def test_delayed_popup_event_reconciles_playing_media_but_preserves_unknown_result(self):
+        for unknown in (False,True):
+            a=Adapter()
+            def route(account,tool,**args):
+                a.calls.append((account,tool,args))
+                if tool=='observe_video_question':raise ActionError('RPC_OPERATION_FAILED_OR_UNKNOWN')
+                if tool=='inspect_current_task':return {'task_state':'video','sample':{'paused':False},'video_result_unknown':unknown}
+                return {}
+            a.route=route;c=ReviewCoordinator(a)
+            if unknown:
+                with self.assertRaises(ActionError):c.review('fixture','video_question')
+            else:self.assertTrue(c.review('fixture','video_question')['playback_continues'])
+            calls=[tool for _,tool,_ in a.calls]
+            self.assertEqual('resume_learning_batch' in calls,not unknown)
+            self.assertFalse(any('submit' in tool or 'answer_video' in tool for tool in calls))
     def test_slow_model_isolated_from_other_account_and_same_account_double_start(self):
         import threading
         from concurrent.futures import ThreadPoolExecutor

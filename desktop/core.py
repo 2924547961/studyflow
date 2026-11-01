@@ -384,8 +384,13 @@ class ReviewCoordinator:
                     video=False;attention='chapter_quiz'
                     obs=self.adapter.route(account,'observe_chapter_quiz')
                 elif task.get('video_finished_marker') is True:
+                    if task.get('video_result_unknown'):raise
                     self.adapter.route(account,'resume_learning_batch')
                     return {'status':'obsolete_popup_event','platform_video_completed':True}
+                elif (task.get('task_state')=='video' and not task.get('video_result_unknown')
+                      and (task.get('sample') or {}).get('paused') is False):
+                    self.adapter.route(account,'resume_learning_batch')
+                    return {'status':'obsolete_popup_event','playback_continues':True}
                 else:raise
             previous=obs.get('prior_attempt')
             rejected=video and isinstance(previous,dict) and previous.get('correct') is False

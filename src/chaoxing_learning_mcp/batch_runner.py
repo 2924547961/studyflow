@@ -321,6 +321,8 @@ def inspect_current_task() -> dict:
     finished,media_progress=_video_completion(d,page)
     result={'account_id':d._state.get('account_id'),'server_pid':page.get('server_pid'),
             'generation':page.get('generation'),'cards':cards,'video_finished_marker':finished}
+    result['video_result_unknown']=any(not isinstance(v,dict) or v.get('correct') is None
+        for v in d._state.get('video_question_attempts',{}).values())
     if media_progress:result['media_progress']=media_progress
     result['teacher_quiz_unavailable']=any('教师未创建完成该测验' in f.get('text','') for f in frames)
     if len(active)==1 and re.search('测验|测试|练习',active[0].get('text','')):

@@ -88,4 +88,7 @@ def test_imported_account_without_worker_has_normal_stopped_browser_status(monke
     result=gateway.desktop_account_tool('fixture','browser_status')
     assert result['running'] is False and result['state']=='not_started'
     assert result['account_id']=='fixture'
+    health=gateway.desktop_account_tool('fixture','runtime_health')
+    assert health['account_id']=='fixture' and health['state']=='not_started'
+    assert health['browser_polled'] is False
 

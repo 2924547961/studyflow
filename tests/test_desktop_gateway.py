@@ -4,6 +4,17 @@ from chaoxing_learning_mcp import course_direct as d, course_tasks as tasks, par
 from chaoxing_learning_mcp import desktop_gateway as g
 
 
+def test_read_worker_recovery_updates_only_stateless_child_gateway(monkeypatch):
+    from unittest.mock import Mock
+    monkeypatch.setattr(tasks,'_accounts',{'fixture':object()})
+    monkeypatch.setattr(p,'_sessions',{'fixture':object()})
+    call=Mock(return_value={'ok':True});monkeypatch.setattr(p,'parallel_account_tool',call)
+    args={'recover_read_worker':True}
+    assert g.desktop_account_tool('fixture','recover_current_task',args)['ok']
+    assert [c.args[1] for c in call.call_args_list]==['refresh_desktop_implementation','desktop_account_tool']
+    assert call.call_args.args[2]['arguments']==args
+
+
 def test_model_preferences_schema_avoids_reserved_pydantic_field():
     from mcp.server.mcpserver.tools import Tool
     tool=Tool.from_function(d.configure_desktop_preferences)

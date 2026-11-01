@@ -11,6 +11,49 @@ from chaoxing_learning_mcp import course_direct as d
 
 
 @pytest.mark.skipif(os.environ.get('STUDYFLOW_BROWSER_FIXTURE_TEST')!='1',reason='Explicit offline browser test')
+def test_completed_sibling_popup_does_not_block_current_video_question(monkeypatch):
+    with sync_playwright() as pw:
+        browser=pw.chromium.launch(channel='msedge',headless=True)
+        try:
+            context=browser.new_context()
+            def route(request):
+                if '/video/' in request.request.url:
+                    number=request.request.url.rsplit('/',1)[-1]
+                    request.fulfill(content_type='text/html',body=f'''<video></video>
+                    <div class="ans-videoquiz"><div class="tkItem_title">Fixture question {number}</div>
+                    <label class="ans-videoquiz-opt">A. First<input type="radio" name="answer"></label>
+                    <label class="ans-videoquiz-opt">B. Second<input type="radio" name="answer"></label></div>''')
+                else:
+                    request.fulfill(content_type='text/html',body='''<body><script>
+                    for(const n of [1,2,3]){let a=document.createElement('div');
+                    a.className='ans-attach-ct videoContainer'+(n===1?' ans-job-finished':'');
+                    let f=document.createElement('iframe');f.src='/video/'+n;
+                    f.setAttribute('data',JSON.stringify({objectid:String(n),_jobid:'job'+n}));
+                    a.append(f);document.body.append(a);}</script>''')
+            context.route('**/*',route);page=context.new_page();page.goto('https://fixture.chaoxing.com/lesson')
+            page.wait_for_function("document.querySelectorAll('iframe').length===3 && Array.from(document.querySelectorAll('iframe')).every(f=>f.contentDocument.querySelector('.ans-videoquiz'))")
+            monkeypatch.setattr(d,'_check_gates',lambda _:None)
+            monkeypatch.setattr(d,'_state',{'generation':'fixture'})
+            selected,panel,question=d._video_question_snapshot(page)
+            assert selected.url.endswith('/2') and question['question']=='Fixture question 2'
+            assert len(question['options'])==2
+            assert all(f.locator('input:checked').count()==0 for f in page.frames)
+            monkeypatch.setattr(d,'_read_live_sample',lambda:None)
+            monkeypatch.setattr(d.smtp_notifications,'observe_playback_started',lambda *args:None)
+            watch={'enabled':True,'status':'armed','frame':selected,'page_url':page.url,'due':0}
+            d._state.update(page=page,video_watch=watch)
+            d._watch_tick()
+            assert watch['status']=='question_requires_review' and 0<watch['due']-time.monotonic()<=15
+            selected.locator('.ans-videoquiz').evaluate("el=>el.remove()")
+            selected.frame_element().evaluate("el=>el.closest('.ans-attach-ct').classList.add('ans-job-finished')")
+            watch['due']=0;d._watch_tick()
+            assert watch['status']=='ended_needs_task_confirmation' and not watch['enabled']
+            page.locator('.ans-attach-ct').evaluate_all("els=>els.forEach(e=>e.classList.add('ans-job-finished'))")
+            with pytest.raises(ValueError,match='already completed'):d._video_question_snapshot(page)
+        finally:browser.close()
+
+
+@pytest.mark.skipif(os.environ.get('STUDYFLOW_BROWSER_FIXTURE_TEST')!='1',reason='Explicit offline browser test')
 def test_two_required_videos_play_and_finish_in_dom_order(monkeypatch,tmp_path):
     ffmpeg=shutil.which('ffmpeg')
     if not ffmpeg:pytest.skip('Short fixture generation needs ffmpeg')

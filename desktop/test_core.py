@@ -20,6 +20,29 @@ class Adapter:
         return {}
 
 class DesktopTests(unittest.TestCase):
+    def test_slow_model_isolated_from_other_account_and_same_account_double_start(self):
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        a=Adapter();a.obs['verified_answer_lookup']={'complete':False}
+        coordinator=ReviewCoordinator(a);entered=threading.Event();release=threading.Event()
+        proposal={'answers':['A'],'reviews':[{'model_reviewed':True,'certain':True,'basis':'Synthetic fixture definition'}]}
+        def slow(*args):
+            entered.set()
+            if not release.wait(5):raise AssertionError('Test model was not released')
+            raise ActionError('MODEL_RESPONSE_FAILED_NO_RETRY')
+        slow_model=Mock();slow_model.review.side_effect=slow
+        fast_model=Mock();fast_model.review.return_value=proposal
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pending=pool.submit(coordinator.review,'slow','chapter_quiz',slow_model,'fixture')
+            try:
+                self.assertTrue(entered.wait(2))
+                with self.assertRaisesRegex(ActionError,'ACCOUNT_REVIEW_IN_PROGRESS'):
+                    coordinator.review('slow','chapter_quiz',slow_model,'fixture')
+                result=pool.submit(coordinator.review,'fast','chapter_quiz',fast_model,'fixture').result(timeout=2)
+                self.assertTrue(result['confirmed']);self.assertFalse(pending.done())
+            finally:release.set()
+            with self.assertRaisesRegex(ActionError,'MODEL_RESPONSE_FAILED'):pending.result(timeout=2)
+        self.assertEqual([account for account,tool,_ in a.calls if tool=='submit_reviewed_chapter_quiz'],['fast'])
     def test_json_missing_closer_is_format_only(self):
         from core import parse_model_json
         text='{"answers":["A"],"reviews":[{"basis":"evidence","extra":{"ok":true}]}'

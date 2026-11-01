@@ -327,69 +327,17 @@ def inspect_current_task() -> dict:
         result.update(task_state='chapter_quiz_review',next_action='observe_chapter_quiz')
     elif finished:result.update(task_state='video_completed',next_action='Confirm directory and remaining cards; do not replay')
     elif sum(f.get('videos',0) for f in frames)>=1:
-        result.update(task_state='video',sample=d.control_owned_video('inspect')['sample'])
+        question=d._run(lambda:d._ordered_video_frame(d._require_page()).locator('.ans-videoquiz:visible').count())
+        result.update(task_state='video_question_review' if question else 'video',
+                      sample=d.control_owned_video('inspect')['sample'])
+        if question:result['next_action']='observe_video_question'
     else:result.update(task_state='loading_or_nonvideo',next_action='Wait for active task card; do not blindly play')
     return result
 
 
 def _recover_read_worker(d, cancel_hung_play_wait=False):
-    """Unlock only after a FIFO read probe proves the original owner is responsive."""
-    import queue
-    if d._state.get('submit_attempted') or d.course_extension._pending:
-        return {'ok':False,'error_code':'PENDING_SUBMISSION_OR_REVIEW'}
-    if not d._worker_failed:return {'ok':True,'recovered':False,'browser_restarted':False}
-    failed=[entry for entry in d._LOG if entry.get('outcome')=='failed']
-    actual=[x for x in failed if x.get('stage') in ('inspect_owned_page','browser_status','owned_window_status')
-            and 'outcome unknown' in x.get('error','')]
-    if actual:failed=[actual[-1]]
-    elif not failed or failed[-1].get('stage')!='inspect_owned_page':
-        return {'ok':False,'error_code':'READ_TIMEOUT_NOT_CONFIRMED'}
-    if not d._worker or not d._worker.is_alive():
-        return {'ok':False,'error_code':'ORIGINAL_OWNER_NOT_ALIVE'}
-    if cancel_hung_play_wait:
-        dispatcher=getattr(d._state.get('page'),'_dispatcher_fiber',None)
-        frame=getattr(getattr(dispatcher,'parent',None),'gr_frame',None)
-        frames=[]
-        while frame is not None:
-            frames.append(frame);frame=frame.f_back
-        control=next((f for f in frames if f.f_code.co_name=='control' and
-                      f.f_locals.get('action')=='play' and 'v=>v.play()' in f.f_code.co_consts),None)
-        sync=next((f for f in frames if f.f_code.co_name=='_sync'),None)
-        task=sync.f_locals.get('task') if sync else None
-        if control is None or task is None or task.done():
-            return {'ok':False,'error_code':'HUNG_PLAY_PROMISE_NOT_CONFIRMED'}
-        if d._state.get('hung_play_wait_cancel_attempted'):
-            return {'ok':False,'error_code':'PLAY_WAIT_CANCEL_ALREADY_ATTEMPTED'}
-        d._state['hung_play_wait_cancel_attempted']=True
-        # Cancel only the Python wait; no DOM, media, network or grade mutation.
-        task.get_loop().call_soon_threadsafe(task.cancel)
-    elif (d._state.get('read_worker_probe_attempted') and
-          d._state.get('read_worker_probe_failure_ts')==failed[-1].get('ts')):
-        import sys,traceback
-        from pathlib import Path
-        frame=sys._current_frames().get(getattr(d._worker,'ident',None))
-        stack=[{'file':Path(x.filename).name,'line':x.lineno,'function':x.name}
-               for x in traceback.extract_stack(frame)[-12:]] if frame else []
-        dispatcher=getattr(d._state.get('page'),'_dispatcher_fiber',None)
-        caller=getattr(getattr(dispatcher,'parent',None),'gr_frame',None)
-        caller_stack=[{'file':Path(x.filename).name,'line':x.lineno,'function':x.name}
-                      for x in traceback.extract_stack(caller)[-16:]] if caller else []
-        return {'ok':False,'error_code':'READ_WORKER_PROBE_ALREADY_ATTEMPTED',
-                'owner_stack':stack,'caller_stack':caller_stack}
-    d._state['read_worker_probe_attempted']=True
-    d._state['read_worker_probe_failure_ts']=failed[-1].get('ts')
-    done=queue.Queue(maxsize=1)
-    def probe():
-        page=d._state.get('page')
-        return page is not None and not page.is_closed()
-    # FIFO completion proves the timed-out job has returned; never replay it.
-    d._jobs.put((probe,(),{},done))
-    try:ok,available=done.get(timeout=5)
-    except queue.Empty:return {'ok':False,'error_code':'ORIGINAL_OWNER_STILL_UNRESPONSIVE'}
-    if not ok or not isinstance(available,bool):
-        return {'ok':False,'error_code':'ORIGINAL_PAGE_NOT_AVAILABLE'}
-    d._worker_failed=False
-    return {'ok':True,'recovered':True,'original_page_closed':not available,'browser_restarted':False,'operation_replayed':False}
+    from .worker_readback import recover_read_worker
+    return recover_read_worker(d,cancel_hung_play_wait)
 
 
 def recover_current_task(renew_session: bool = False, recover_read_worker: bool = False,
@@ -753,6 +701,25 @@ def _step_locked():
             _state['status']='running'
 
 
+def _resume_stale_video_attention():
+    """Retire only an obsolete popup wait from the same watched course task."""
+    from . import course_direct as d
+    if _state.get('status')!='awaiting_review' or _state.get('attention')!='video_question':return False
+    if d._state.get('submit_attempted') or d.course_extension._pending:return False
+    if any(not isinstance(v,dict) or v.get('correct') is None for v in d._state.get('video_question_attempts',{}).values()):return False
+    watch=d._state.get('video_watch',{});current=_state.get('current') or {}
+    if watch.get('status') not in ('playing','ended_needs_task_confirmation'):return False
+    if d._state.get('account_id')!=current.get('account_id'):return False
+    query={k.lower():v for k,v in parse_qs(urlparse(watch.get('page_url','')).query).items()}
+    expected=dict(re.findall(r'(courseid|clazzid):([^:]+)',current.get('course_id','')))
+    if not expected or query.get('chapterid')!=[str(current.get('chapter_id'))]:return False
+    if any(query.get(k)!=[v] for k,v in expected.items()):return False
+    from .runtime_resilience import clear
+    clear(_state)
+    _state.update(status='running',review_required=False,attention_owner='script',user_action_required=False)
+    _save();return True
+
+
 def _loop():
     from .runtime_resilience import clear
     while _state.get('status') not in ('stopped','completed'):
@@ -774,6 +741,8 @@ def _loop():
                     clear(_state)
                     _state.update(status='running',attention_owner='script',user_action_required=False)
                     _save()
+            elif _state['status']=='awaiting_review' and _state.get('attention')=='video_question':
+                _resume_stale_video_attention()
             elif (_state['status']=='blocked' and _state.get('attention')=='Playback needs inspection'
                   and time.monotonic()>=_state.get('media_completion_probe_due',0)):
                 # Only this media fault is eligible; never wake a quiz, face gate,

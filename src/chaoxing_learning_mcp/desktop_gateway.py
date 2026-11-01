@@ -128,6 +128,19 @@ def desktop_report_state(client_state: dict):
 def desktop_account_tool(account_id: str, tool_name: str, arguments: dict | None = None):
     """Explicit account routing; never switch the current browser to answer another account."""
     from . import course_direct as d, course_tasks as tasks, parallel_runner as p, smtp_notifications as mail
+    if tool_name=='recover_current_task' and (arguments or {}).get('recover_read_worker'):
+        if account_id not in tasks._accounts:raise ValueError('UNKNOWN_ACCOUNT')
+        if (arguments or {}).get('account_id',account_id)!=account_id:raise ValueError('ACCOUNT_ID_MISMATCH')
+        if account_id in p._sessions:
+            p.REVIEW_TOOLS.update({'refresh_desktop_implementation','desktop_account_tool'})
+            p.parallel_account_tool(account_id,'refresh_desktop_implementation',{})
+            return p.parallel_account_tool(account_id,'desktop_account_tool',{'account_id':account_id,'tool_name':tool_name,'arguments':arguments})
+        if d._state.get('account_id')!=account_id:raise ValueError('ACCOUNT_BROWSER_NOT_RUNNING')
+        import importlib
+        from . import worker_readback
+        importlib.reload(worker_readback)
+        with d._operation_lock:
+            return worker_readback.recover_read_worker(d,(arguments or {}).get('cancel_hung_play_wait',False))
     if tool_name=='recover_chapter_submission_readback' and account_id not in tasks._accounts:raise ValueError('UNKNOWN_ACCOUNT')
     if tool_name=='recover_chapter_submission_readback' and account_id in p._sessions:
         p.REVIEW_TOOLS.update({'refresh_desktop_implementation','desktop_account_tool'})

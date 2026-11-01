@@ -41,6 +41,22 @@ def test_status_timeout_can_recover_after_following_guard_errors():
     assert not owner._worker_failed
 
 
+@pytest.mark.parametrize('change,accepted',[
+    ({},True),({'status':'ended_needs_task_confirmation'},True),
+    ({'status':'question_requires_review'},False),({'attention':'chapter_quiz'},False),
+    ({'account':'other'},False),({'chapter':'other'},False),({'pending':True},False),({'unknown':True},False)])
+def test_stale_popup_wait_reconciles_only_same_task_verified_watch(monkeypatch,change,accepted):
+    b._state.update(status='awaiting_review',attention=change.get('attention','video_question'),
+        current={'account_id':'one','course_id':'courseid:c:clazzid:k','chapter_id':'1'})
+    d._state.update(account_id=change.get('account','one'),submit_attempted=change.get('pending',False),
+        video_question_attempts={'q':'outcome_unknown'} if change.get('unknown') else {'q':{'correct':True}},
+        video_watch={'status':change.get('status','playing'),
+            'page_url':'https://fixture/lesson?courseId=c&clazzid=k&chapterId='+change.get('chapter','1')})
+    monkeypatch.setattr(b,'_save',Mock())
+    assert b._resume_stale_video_attention() is accepted
+    assert b._state['status']==('running' if accepted else 'awaiting_review')
+
+
 def test_unresponsive_read_worker_remains_locked(monkeypatch):
     import queue
     class NoReply:

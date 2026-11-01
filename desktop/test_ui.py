@@ -11,6 +11,59 @@ from theme import STYLE
 
 
 class UITests(unittest.TestCase):
+    def test_confirmed_review_allows_next_popup_without_observing_running_between(self):
+        w=Window();w.timer.stop();w.task=Mock()
+        w.auto_attempts={('fixture','chapter'),('other','chapter')}
+        w.done('审阅 fixture',{'confirmed':True})
+        self.assertEqual(w.auto_attempts,{('other','chapter')})
+        w.auto_attempts.add(('fixture','chapter'))
+        w.done('审阅 fixture',{'confirmed':False})
+        self.assertIn(('fixture','chapter'),w.auto_attempts)
+        w.close()
+    def test_media_recovery_rearms_guarded_watcher_instead_of_blind_play(self):
+        w=Window();w.timer.stop();w.task=Mock();w.adapter=Mock()
+        w.adapter.route.return_value={}
+        for kind in ('video','video_question_review'):
+            w.adapter.route.reset_mock()
+            result=w.resume_observed_task('fixture',{'task_state':kind,'sample':{'paused':True}})
+            self.assertTrue(result['resumed'])
+            self.assertEqual([(c.args[1],c.kwargs) for c in w.adapter.route.call_args_list],
+                [('monitor_owned_video',{'action':'stop'}),('monitor_owned_video',{'action':'start'}),('resume_learning_batch',{})])
+        w.close()
+
+    def test_same_chapter_later_video_or_pause_can_recover_without_duplicate_attempts(self):
+        w=Window();w.timer.stop();w.adapter=Mock();w.task=Mock()
+        row={'account_id':'fixture','status':'blocked','attention':'Playback needs inspection',
+             'current':{'chapter_id':'one','media_progress':{'next_video_number':1},'sample':{'current_time':20,'paused':True}}}
+        w.done('status',{'accounts':[row]});w.done('status',{'accounts':[row]})
+        self.assertEqual([c.args[0] for c in w.task.call_args_list].count('自动故障处理:fixture'),1)
+        row['current']['sample']['current_time']=40
+        w.done('status',{'accounts':[row]})
+        row['current']['media_progress']['next_video_number']=2
+        w.done('status',{'accounts':[row]})
+        self.assertEqual([c.args[0] for c in w.task.call_args_list].count('自动故障处理:fixture'),3)
+        w.close()
+
+    def test_stale_gui_sample_never_queues_player_inspection_during_navigation(self):
+        w=Window();w.timer.stop();w.adapter=Mock();w.task=Mock()
+        row={'account_id':'fixture','status':'running','current':{'chapter_id':'one',
+             'sample_age_seconds':90,'sample':{'current_time':20,'paused':False,'ended':False}}}
+        w.done('status',{'accounts':[row]})
+        self.assertFalse(any(c.args[0]=='媒体采样 fixture' for c in w.task.call_args_list))
+        w.close()
+
+    def test_recovery_waits_for_same_account_close_but_not_other_account(self):
+        w=Window();w.timer.stop();w.adapter=Mock();w.task=Mock()
+        w.busy.add('关闭账号:fixture')
+        w.schedule_recovery('fixture',('new-fault','fixture'))
+        w.task.assert_not_called()
+        self.assertNotIn(('new-fault','fixture'),w.recoveries)
+        w.schedule_recovery('other',('new-fault','other'))
+        self.assertEqual(w.task.call_args.args[0],'自动故障处理:other')
+        w.busy.clear();w.schedule_recovery('fixture',('new-fault','fixture'))
+        self.assertEqual(w.task.call_args.args[0],'自动故障处理:fixture')
+        w.close()
+
     def test_help_is_bundled_and_no_manual_repair_button_or_embedded_key(self):
         from PyQt6.QtWidgets import QPushButton
         w=Window();w.timer.stop();w.task=Mock()
@@ -55,11 +108,14 @@ class UITests(unittest.TestCase):
         self.assertEqual([key for key,fn in jobs].count('只读恢复:fixture'),1)
         jobs[0][1]();w.adapter.route.assert_called_with('fixture','recover_current_task',recover_read_worker=True)
         w.close()
-    def test_submission_timeout_starts_readback_and_resumes_only_if_verified(self):
+    def test_review_transport_failure_classifies_actual_worker_before_recovery(self):
         w=Window();w.timer.stop();w.adapter=Mock();jobs=[];w.task=lambda key,fn:jobs.append((key,fn))
         w.failed('审阅 fixture','RPC_OPERATION_FAILED_OR_UNKNOWN')
-        self.assertEqual(jobs[-1][0],'提交回读恢复:fixture')
-        jobs.pop()[1]();w.adapter.route.assert_called_with('fixture','recover_chapter_submission_readback')
+        self.assertEqual(jobs[-1][0],'自动故障处理:fixture')
+        w.adapter.route.side_effect=[{'unknown_submission':True},{'recovered':False,'reason':'GRADING_PENDING'}]
+        jobs.pop()[1]()
+        self.assertEqual([c.args[1] for c in w.adapter.route.call_args_list],['runtime_health','recover_chapter_submission_readback'])
+        w.adapter.route.side_effect=None
         w.done('提交回读恢复:fixture',{'recovered':True,'grading':{'score':100}})
         self.assertEqual(jobs[-1][0],'接续课程:fixture')
         jobs.pop()[1]();w.adapter.route.assert_called_with('fixture','resume_learning_batch')

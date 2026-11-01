@@ -1297,11 +1297,14 @@ def switch_owned_video_line(line: str) -> dict[str, Any]:
 
 def _video_question_snapshot(page):
     _check_gates(page)
-    matches = [(f, f.locator('.ans-videoquiz:visible')) for f in page.frames
-               if f.locator('.ans-videoquiz:visible').count()]
-    if len(matches) != 1 or matches[0][1].count() != 1:
+    # A completed sibling can retain a visible popup. Bind every read and write
+    # to the same ordered, unfinished task used by playback and its watcher.
+    frame = _ordered_video_frame(page)
+    if _video_frame_finished(page,frame):
+        raise ValueError('Current video task already completed; reconcile directory')
+    panel = frame.locator('.ans-videoquiz:visible')
+    if panel.count() != 1:
         raise ValueError('Expected one visible in-video question')
-    frame, panel = matches[0]
     title = panel.locator('.tkItem_title')
     if title.count() != 1:
         raise ValueError('Unsupported in-video question batch')
@@ -2130,11 +2133,13 @@ def _watch_tick():
         if finished_marker:
             w.update(enabled=False,status='ended_needs_task_confirmation');return
         if frame.locator('.ans-videoquiz:visible').count():
-            w.update(status='question_requires_review',due=float('inf'));return
+            # Grading/continuation can hide the panel asynchronously after our
+            # immediate readback. Recheck its disappearance/completion, not submit.
+            w.update(status='question_requires_review',due=time.monotonic()+15);return
         if sample['ended'] or finished_marker or w.get('ended_event_seen'):
             w.update(enabled=False, status='ended_needs_task_confirmation')
         elif frame.locator('.ans-videoquiz:visible').count():
-            w.update(status='question_requires_review', due=float('inf'))
+            w.update(status='question_requires_review', due=time.monotonic()+15)
         elif sample['paused']:
             # Unknown overlays are not normal pauses. Never force through them.
             overlays = frame.locator('[role=dialog]:visible, .vjs-modal-dialog:visible, .vjs-error-display:visible')

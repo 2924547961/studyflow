@@ -1,6 +1,6 @@
 [project]
 name = "studyflow-mcp"
-version = "1.9.7"
+version = "1.9.8"
 description = "StudyFlow MCP for Chaoxing course tasks and exams"
 requires-python = ">=3.11"
 license = {file = "LICENSE"}

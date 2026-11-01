@@ -45,7 +45,7 @@ ERRORS={'MODEL_OUTPUT_LIMIT_REACHED':'模型在给出完整答案前达到输出
     'EXISTING_SUPERVISOR_CONFIG_CONFLICT':'启动设置与现有后台不一致，所选课程尚未启动；请沿用原浏览器模式和倍速。',
     'COURSE_QUEUE_START_FAILED':'课程启动失败，请查看该账号最新错误；当前请求未确认运行。',
     'WORKER_TOOL_FAILED':'账号进程返回异常，操作未确认；请刷新该账号状态并查看最新诊断。',
-    'RPC_OPERATION_FAILED_OR_UNKNOWN':'操作结果待核验，现有现场已保留；请刷新状态，避免重复提交。',
+    'RPC_OPERATION_FAILED_OR_UNKNOWN':'正在按故障类型自动核验原现场；提交结果未确认时仅回读，不重复提交。',
     'MODEL_RESPONSE_FAILED_NO_RETRY':'模型未返回完整审阅，请检查输出上限、网络或模型服务。'}
 
 class Events(QObject):
@@ -164,14 +164,15 @@ class Window(QMainWindow):
         self.log_raw.setVisible(self.log_technical.isChecked())
         bar.setValue(bar.maximum() if at_end else min(position,bar.maximum()))
     def recover_account(self,aid):
-        try:task=self.adapter.route(aid,'inspect_current_task')
-        except ActionError:
-            status=self.adapter.route(aid,'browser_status')
-            if status.get('running') is False:
-                return self.adapter.route(aid,'open_account_browser',show_window=False,closed_only=True)
-            raise
-        if task.get('task_state') in ('verification_required','face_verification_required'):return task
-        return self.adapter.route(aid,'resume_learning_batch')
+        return self.auto_repair(aid)
+    def recovery_busy(self,aid):
+        return any(prefix+aid in self.busy for prefix in ('自动故障处理:','只读恢复:','接续只读恢复:','提交回读恢复:','审阅 ',
+            '启动账号:','关闭账号:','打开交互浏览器:','返回后台:','启动队列:')) or self.exam_operation_active(aid)
+    def schedule_recovery(self,aid,scene):
+        if not self.adapter or self.recovery_busy(aid) or scene in self.recoveries:return
+        self.recoveries.add(scene)
+        self.help_recovery.appendPlainText(aid+'：检测到故障，正在自动核验当前任务。')
+        self.task('自动故障处理:'+aid,lambda aid=aid:self.auto_repair(aid))
     def apply_preferences(self,preferences):
         self.queue_drafts=preferences.get('course_queues',{})
         self.profiles.update(preferences.get('profiles',{}))
@@ -193,6 +194,11 @@ class Window(QMainWindow):
     def done(self,key,data):
         self.busy.discard(key)
         self.last_errors.pop(key,None)
+        if key.startswith('审阅 ') and isinstance(data,dict) and data.get('confirmed') is True:
+            # A next popup can arrive before the two-second UI poll observes the
+            # intervening playing state. Per-question write guards remain in core.
+            aid=key.removeprefix('审阅 ')
+            self.auto_attempts={item for item in self.auto_attempts if item[0]!=aid}
         if key.startswith('审阅 ') and isinstance(data,dict) and data.get('correct') is False:
             self.failed(key,'VIDEO_ANSWER_PLATFORM_REJECTED_REVIEW_REQUIRED')
             self.append_audit({'account':key.removeprefix('审阅 '),'event':'平台弹题判错','result':data})
@@ -227,24 +233,18 @@ class Window(QMainWindow):
                 if self.last_states.get(aid)!=state:
                     self.last_states[aid]=state
                     self.append_audit({'account':aid,'event':'状态变化','status':a.get('status'),'chapter':current.get('chapter'),'attention':a.get('attention'),'error':a.get('error_code')})
-                if self.adapter and sample and a.get('status')=='running' and not a.get('attention') and not sample.get('ended') and not sample.get('paused') and (age is None or age>15) and now>=self.sample_due.get(aid,0):
-                    self.sample_due[aid]=now+30
-                    self.task('媒体采样 '+aid,lambda aid=aid,cid=current.get('chapter_id'):{**self.adapter.route(aid,'control_owned_video',action='inspect'),'chapter_id':cid})
+                # The browser watcher already samples every two seconds. A stale
+                # UI snapshot must not enqueue another player read after navigation.
                 if self.adapter and now>=self.mail_due.get(aid,0):
                     self.mail_due[aid]=now+60
                     self.task('通知记录 '+aid,lambda aid=aid:self.adapter.route(aid,'smtp_notification_status'))
-                recovery=(aid,current.get('course_id'),current.get('chapter_id'),a.get('attention'))
-                if (self.adapter and a.get('status')=='blocked' and
-                    (str(a.get('attention','')).startswith('Video ended; confirm platform directory') or a.get('attention')=='Playback needs inspection') and recovery not in self.recoveries):
-                    self.recoveries.add(recovery)
-                    self.task('自动目录复核 '+aid,lambda aid=aid:self.recover_account(aid))
-                fault=('typed_fault',aid,current.get('chapter_id'),a.get('error_code'))
-                if (self.adapter and a.get('status')=='blocked' and a.get('error_code') in ('TASK_INSPECTION_REQUIRED','TRANSIENT_RECOVERY_EXHAUSTED')
-                    and fault not in self.recoveries and not self.exam_operation_active(aid)
-                    and '只读恢复:'+aid not in self.busy):
-                    self.recoveries.add(fault)
-                    self.help_recovery.appendPlainText(aid+'：自动检查 '+str(a.get('error_code')))
-                    self.task('自动故障处理:'+aid,lambda aid=aid:self.auto_repair(aid))
+                recovery=('task_fault',aid,current.get('course_id'),current.get('chapter_id'),
+                    (current.get('media_progress') or {}).get('next_video_number'),
+                    a.get('attention'),a.get('error_code'),int(sample.get('current_time') or 0))
+                if (a.get('status')=='blocked' and (a.get('error_code') in ('TASK_INSPECTION_REQUIRED','TRANSIENT_RECOVERY_EXHAUSTED')
+                    or str(a.get('attention','')).startswith('Video ended; confirm platform directory')
+                    or a.get('attention')=='Playback needs inspection')):
+                    self.schedule_recovery(aid,recovery)
                 media=media_caption(sample,current.get('media_progress'))
                 recovering=any(prefix+aid in self.busy for prefix in ('只读恢复:','接续只读恢复:','提交回读恢复:','自动故障处理:'))
                 values=[a['account_id'],('正在自动恢复' if recovering else '正在完成章节测验' if a.get('attention')=='chapter_quiz' else '正在处理视频弹题' if a.get('attention')=='video_question' else STATUS.get(a['status'],a['status'])),current.get('chapter') or '尚未安排任务',media,
@@ -276,6 +276,12 @@ class Window(QMainWindow):
             else:self.append_audit({'account':aid,'event':'提交只读核验待处理','error':data.get('reason','GRADING_READBACK_FAILED'),'automatic_resubmit':False})
         elif key.startswith('自动故障处理:'):
             aid=key.split(':',1)[1]
+            if data.get('recovery_kind')=='submission_readback' and not data.get('recovered'):
+                self.submission_checks=getattr(self,'submission_checks',{});self.submission_checks[aid]=0
+                self.done('提交回读恢复:'+aid,data)
+            if data.get('resumed'):
+                for old in ('媒体采样 '+aid,'浏览器状态:'+aid,'自动目录复核 '+aid):self.last_errors.pop(old,None)
+                self.auto_attempts={item for item in self.auto_attempts if item[0]!=aid}
             self.help_recovery.appendPlainText(aid+'：'+str(data.get('message') or data.get('reason') or data.get('status','已检查')))
             self.append_audit({'account':aid,'event':'自动故障处理','result':data,'automatic_resubmit':False})
         elif key.startswith('通知记录 '):
@@ -381,7 +387,7 @@ class Window(QMainWindow):
         elif key.startswith('浏览器状态:'):
             aid=key.split(':',1)[1];self.browser_live[aid]=bool(data.get('running'))
             scene=('readonly_worker',aid,data.get('worker_failure_id') or data.get('generation'))
-            if data.get('worker_failed') and scene not in self.recoveries:
+            if data.get('worker_failed') and scene not in self.recoveries and not self.recovery_busy(aid):
                 self.recoveries.add(scene)
                 if data.get('submit_attempted'):
                     self.submission_checks=getattr(self,'submission_checks',{});self.submission_checks[aid]=0
@@ -445,9 +451,15 @@ class Window(QMainWindow):
                 self.exam_info.setText('等待本人进入考试或完成验证；检测到该账号新试卷标签后自动接续，无需再次点击。')
                 self.update_actions();return
             self.exam_intents.pop(aid,None)
-        if key.startswith('审阅 ') and error=='RPC_OPERATION_FAILED_OR_UNKNOWN' and self.adapter:
-            aid=key.split(' ',1)[1];self.submission_checks=getattr(self,'submission_checks',{});self.submission_checks[aid]=0
-            self.task('提交回读恢复:'+aid,lambda:self.adapter.route(aid,'recover_chapter_submission_readback'))
+        if key.startswith('审阅 ') and error in ('RPC_OPERATION_FAILED_OR_UNKNOWN','CONNECTION_OR_RESULT_UNKNOWN','STATUS_CONNECTION_RETRY_PENDING') and self.adapter:
+            aid=key.split(' ',1)[1];current=(self.rows.get(aid) or {}).get('current') or {}
+            # Observation and submission failures share transport codes; use the
+            # actual worker state instead of assuming that a write occurred.
+            self.schedule_recovery(aid,('review_rpc_failure',aid,current.get('chapter_id'),error))
+        if key.startswith(('媒体采样 ','浏览器状态:')) and self.adapter:
+            aid=key.replace(':',' ').split()[-1]
+            current=(self.rows.get(aid) or {}).get('current') or {}
+            self.schedule_recovery(aid,('read_failure',aid,current.get('chapter_id'),error))
         self.help_recovery.appendPlainText(key+'：'+str(error))
         self.last_errors[key]=error
         error=ERRORS.get(error,error)
@@ -464,9 +476,11 @@ class Window(QMainWindow):
         health=self.adapter.route(aid,'runtime_health')
         if health.get('unknown_submission'):
             result=self.adapter.route(aid,'recover_chapter_submission_readback')
+            result['recovery_kind']='submission_readback'
             if result.get('recovered'):
                 self.adapter.route(aid,'resume_learning_batch')
                 result['message']='原提交已核验评分，自动接续；未重交。'
+                result['resumed']=True
             return result
         if health.get('pending_review'):return {'message':'原审阅仍在处理中，保留计划并等待回执。'}
         if health.get('browser_worker_failed'):
@@ -479,20 +493,25 @@ class Window(QMainWindow):
             if check.get('teacher_quiz_unavailable'):
                 self.adapter.route(aid,'defer_current_learning_task',issue_id='auto_teacher_unpublished',reason='两次独立只读检查确认教师未创建测验，留待补并继续其他可用任务。',evidence_url='https://mooc1.chaoxing.com/mooc-ans/work/doHomeWorkNew')
                 return {'message':'教师未发布：已自动登记待补，继续其他可用任务。'}
-        if task.get('task_state')=='video_completed':
-            self.adapter.route(aid,'monitor_owned_video',action='stop')
-            self.adapter.route(aid,'resume_learning_batch')
-            return {'message':'平台已确认媒体完成，自动核对目录并接续。'}
-        if task.get('task_state')=='video':return self.recover_after_status_fault(aid)
+        if task.get('task_state') in ('video_completed','video','video_question_review','chapter_quiz_review'):
+            return self.resume_observed_task(aid,task)
         return {'message':'已自动检查，当前任务尚未加载或需外部处理；保留现场，其他账号继续。'}
     def recover_after_status_fault(self,aid):
-        self.adapter.route(aid,'open_account_browser',show_window=False,closed_only=True)
+        opened=self.adapter.route(aid,'open_account_browser',show_window=False,closed_only=True)
+        if opened.get('ok') is False:return opened
         task=self.adapter.route(aid,'inspect_current_task')
-        sample=task.get('sample') or {}
-        if task.get('task_state')=='video' and sample.get('paused') and not sample.get('ended'):
-            self.adapter.route(aid,'control_owned_video',action='play',rate=1.25,bring_to_front=False)
-        if task.get('task_state') not in ('video','video_completed','chapter_quiz_review'):return {'message':'等待任务界面就绪；保留当前页面。'}
-        return {**self.adapter.route(aid,'resume_learning_batch'),'message':'原账号已自动恢复并接续。'}
+        return self.resume_observed_task(aid,task)
+    def resume_observed_task(self,aid,task):
+        kind=task.get('task_state')
+        if kind not in ('video','video_completed','video_question_review','chapter_quiz_review'):
+            return {'message':'等待任务界面就绪；保留当前页面。','resumed':False}
+        self.adapter.route(aid,'monitor_owned_video',action='stop')
+        if kind in ('video','video_question_review'):
+            # Re-arm the existing guarded watcher: it distinguishes popup,
+            # verification, ordinary pause and completed task before any play.
+            self.adapter.route(aid,'monitor_owned_video',action='start')
+        return {**self.adapter.route(aid,'resume_learning_batch'),'resumed':True,
+                'message':'原任务监听已恢复；弹题自动进入审题，已完成视频接续目录。'}
     def show_question_results(self):
         self.nav.setCurrentRow(6)
         self.log_current.setChecked(True)

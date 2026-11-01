@@ -11,6 +11,31 @@ from theme import STYLE
 
 
 class UITests(unittest.TestCase):
+    def test_task_transition_clears_obsolete_media_and_old_poll_cannot_restore_it(self):
+        import copy,time
+        w=Window();w.timer.stop();w.task=Mock()
+        current={'chapter_id':'one','course_id':'course','sample_observed_monotonic':time.monotonic()-10,
+                 'sample':{'current_time':90,'duration':100},'media_progress':{'next_video_number':1,'required_video_count':2}}
+        row={'account_id':'fixture','status':'running','current':current}
+        stale=copy.deepcopy(row);w.done('status',{'accounts':[row]})
+        w.update_media({'account_id':'fixture','current':None})
+        w.done('实时进度:fixture',{'current':stale['current']})
+        w.done('status',{'accounts':[copy.deepcopy(stale)]})
+        self.assertNotIn('sample',w.rows['fixture']['current'])
+        fresh={**current,'sample_observed_monotonic':time.monotonic(),
+               'sample':{'current_time':2,'duration':50},'media_progress':{'next_video_number':2,'required_video_count':2}}
+        w.update_media({'account_id':'fixture','current':fresh})
+        self.assertEqual(w.dashboard.media_time.text(),'00:02 / 00:50')
+        self.assertIn('2 / 2',w.dashboard.media_label.text());w.close()
+
+    def test_pause_confirmation_and_real_delay_have_distinct_labels(self):
+        from presentation import media_sync_caption
+        old={'sample':{'current_time':90,'duration':100,'paused':False},'sample_age_seconds':75}
+        self.assertIn('同步延迟',media_sync_caption(old))
+        self.assertIn('处理题目',media_sync_caption(old,'awaiting_review'))
+        self.assertNotIn('延迟',media_sync_caption({**old,'watch_status':'ended_needs_task_confirmation'}))
+        self.assertIn('本人验证',media_sync_caption(old,'awaiting_verification'))
+
     def test_account_guidance_separates_connection_from_learning_and_unifies_pause(self):
         w=Window();w.timer.stop();w.adapter=Mock();w.task=Mock()
         row={'account_id':'fixture','status':'ready','current':{}}

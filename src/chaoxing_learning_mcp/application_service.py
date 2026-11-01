@@ -202,7 +202,19 @@ class ApplicationService:
             identity=(account,current.get('course_id'),current.get('chapter_id'),row['attention'],
                       self.model_revision,hash(json.dumps(supplied,sort_keys=True)))
             with self.lock:
-                if identity in self.auto_attempts:continue
+                if identity in self.auto_attempts:
+                    # A popup can reappear before the supervisor observes the
+                    # brief running state. Keep the write dedup, but reconcile a
+                    # confirmed video answer after the player's async transition.
+                    # ReviewCoordinator freshly observes the panel and seals
+                    # unknown outcomes; it never replays from this cached row.
+                    previous=next((j for j in reversed(list(self.jobs.values()))
+                                   if j['account_id']==account),{})
+                    if not (row['attention']=='video_question'
+                            and previous.get('operation')=='review'
+                            and previous.get('state')=='completed'
+                            and (previous.get('result') or {}).get('confirmed') is True
+                            and time.time()-previous.get('finished_at',time.time())>=5):continue
                 self.auto_attempts.add(identity)
             try:self.start(account,'review',{'attention':row['attention'],'evidence':supplied.get('text',''),
                 'attached':supplied.get('attached_review'),'cache_only':self.cache_only})

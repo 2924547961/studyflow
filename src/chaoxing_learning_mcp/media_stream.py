@@ -1,6 +1,7 @@
 """Authenticated desktop event stream. Reads worker memory, never a browser DOM."""
 from concurrent.futures import ThreadPoolExecutor
 import json
+import select
 import time
 
 
@@ -14,6 +15,10 @@ def serve(handler):
         handler.wfile.write(('data: '+json.dumps(value,separators=(',',':'))+'\n\n').encode());handler.wfile.flush()
     try:
         while True:
+            # POST body is empty; client EOF (or unexpected further input) ends
+            # this one-way stream immediately. Retired desktops must not leave
+            # polling threads alive until the next heartbeat write.
+            if select.select([handler.connection],[],[],0)[0]:break
             now=time.monotonic()
             # Registry memory only: no browser launch or account activation.
             accounts=set(parallel._sessions)
@@ -24,8 +29,10 @@ def serve(handler):
                     del futures[account];due[account]=now+.15
                     try:
                         value=future.result();current=value.get('current')
-                        if not current:continue
-                        identity=(current.get('chapter_id'),current.get('sample_observed_monotonic'))
+                        identity=((current.get('chapter_id'),current.get('course_id'),
+                            current.get('sample_observed_monotonic'),current.get('watch_status'),
+                            current.get('watch_enabled'),json.dumps(current.get('media_progress',{}),sort_keys=True))
+                            if current else ('no_current_media',))
                         if seen.get(account)!=identity:
                             seen[account]=identity;send({'account_id':account,'current':current})
                     except (BrokenPipeError,ConnectionResetError):raise

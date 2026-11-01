@@ -320,6 +320,19 @@ class DesktopTests(unittest.TestCase):
         with self.assertRaisesRegex(ActionError,'UNKNOWN_NO_REPLAY'):ReviewCoordinator(a).review('a','video_question',model)
         model.review.assert_not_called();self.assertEqual(a.route.call_count,1)
 
+    def test_repeated_correct_popup_requires_its_own_current_grading_receipt(self):
+        for result in ({'correct':None},{'correct':False},{}):
+            a=Mock()
+            def route(account,tool,**args):
+                if tool=='observe_video_question':return {'question_token':'same',
+                    'options':[{'letter':'A','selected':False}], 'prior_attempt':{'correct':True,'answer':'A'}}
+                if tool=='answer_video_question':return result
+                raise AssertionError('Unconfirmed repeat must not resume')
+            a.route.side_effect=route
+            value=ReviewCoordinator(a).review('a','video_question',Mock())
+            self.assertFalse(value['confirmed'])
+            self.assertEqual(value['status'],'repeat_result_unconfirmed')
+
     def test_ordered_course_queue(self):
         self.assertEqual(course_queue(['第二门','第一门','第二门',' ']),['第二门','第一门'])
         with self.assertRaises(ActionError):course_queue([])

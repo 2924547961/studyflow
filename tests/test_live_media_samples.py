@@ -40,3 +40,27 @@ def test_changed_page_retains_previous_sample_and_time(monkeypatch):
     read=Mock();monkeypatch.setattr(d,'_watch_sample',read)
     d._read_live_sample();read.assert_not_called()
     assert 'sample_observed_monotonic' not in state['video_watch']
+
+
+def test_lost_event_subscription_rebinds_only_advancing_same_video_and_is_bounded(monkeypatch):
+    from chaoxing_learning_mcp import media_events
+    state,page,frame=fixture_state(monkeypatch)
+    state['video_watch'].update(event_token='existing',sample={'current_time':1},caption_read_due=float('inf'))
+    clock=[100];position=[10]
+    monkeypatch.setattr(d.time,'monotonic',lambda:clock[0])
+    monkeypatch.setattr(d,'_watch_sample',lambda _:dict(current_time=position[0],paused=False,ended=False))
+    attach=Mock();monkeypatch.setattr(media_events,'attach',attach)
+    d._read_live_sample();assert attach.call_count==1
+    clock[0]=116;position[0]=20;d._read_live_sample();assert attach.call_count==1
+    clock[0]=132;position[0]=30;d._read_live_sample();assert attach.call_count==2
+    clock[0]=170;position[0]=40;d._read_live_sample();assert attach.call_count==2
+
+
+def test_paused_popup_does_not_rebind_event_subscription(monkeypatch):
+    from chaoxing_learning_mcp import media_events
+    state,page,frame=fixture_state(monkeypatch)
+    state['video_watch'].update(event_token='existing',sample={'current_time':1},caption_read_due=float('inf'))
+    monkeypatch.setattr(d.time,'monotonic',lambda:100)
+    monkeypatch.setattr(d,'_watch_sample',lambda _:dict(current_time=10,paused=True,ended=False))
+    attach=Mock();monkeypatch.setattr(media_events,'attach',attach)
+    d._read_live_sample();attach.assert_not_called()

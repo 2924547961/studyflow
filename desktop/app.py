@@ -15,7 +15,7 @@ from service_client import ApplicationClient,ModelSelection
 from theme import STYLE
 from ui import build_ui
 from core import audit_data
-from presentation import PRESETS,readable_event,import_profile,export_profile,media_caption
+from presentation import PRESETS,readable_event,import_profile,export_profile,media_caption,media_sync_caption
 
 STATUS={'running':'运行中','starting':'启动中','awaiting_review':'正在处理题目',
         'awaiting_verification':'等待本人验证','blocked':'需要检查','completed':'已完成','stopped':'已暂停',
@@ -95,6 +95,7 @@ class Window(QMainWindow):
         self.finishing=set();self.grade_seen=set();self.replay_seen=set();self.replay_policy_due={}
         self.last_errors={}
         self.audit_rows=[];self.last_states={};self.sample_due={};self.mail_due={};self.recoveries=set();self.live_samples={}
+        self.media_invalidated={}
         self.account_modes={};self.browser_views={};self.active_provider='';self.journal_seen=set();self.completion_seen=set();self.mail_seen=set()
         build_ui(self)
         self.exit_requested=False;self.tray=None
@@ -118,21 +119,34 @@ class Window(QMainWindow):
     def update_media(self,data):
         if self.closed:return
         aid=data.get('account_id');row=self.rows.get(aid);current=data.get('current') or {}
-        if not row or not current.get('sample'):return
+        if not row:return
         existing=row.get('current') or {}
+        if not current:
+            self.media_invalidated[aid]=time.monotonic();self.live_samples.pop(aid,None)
+            existing.pop('sample',None);existing['media_transition']=True
+            for index in range(self.table.rowCount()):
+                item=self.table.item(index,0)
+                if item and item.text()==aid:
+                    self.table.setItem(index,3,QTableWidgetItem('正在衔接当前任务'))
+                    self.table.setItem(index,4,QTableWidgetItem('等待新任务状态'));break
+            if self.selected()==aid:self.dashboard.update_media(existing)
+            return
+        if not current.get('sample'):return
         if (str(existing.get('chapter_id'))!=str(current.get('chapter_id'))
                 or existing.get('course_id')!=current.get('course_id')):return
         observed=current.get('sample_observed_monotonic',0)
+        if observed<self.media_invalidated.get(aid,0):return
         if observed<self.live_samples.get(aid,{}).get('observed_monotonic',0):return
         self.live_samples[aid]={**current,'observed_monotonic':observed}
         self.media_updates=getattr(self,'media_updates',0)+1
         self.media_delay_ms=round(max(0,time.monotonic()-observed)*1000)
-        existing.update(current);existing['sample_age_seconds']=max(0,time.monotonic()-observed)
+        existing.update(current);existing.pop('media_transition',None)
+        existing['sample_age_seconds']=max(0,time.monotonic()-observed)
         for index in range(self.table.rowCount()):
             item=self.table.item(index,0)
             if item and item.text()==aid:
                 self.table.setItem(index,3,QTableWidgetItem(media_caption(current['sample'],current.get('media_progress'))))
-                self.table.setItem(index,4,QTableWidgetItem('网页事件同步' if current.get('sample_source')=='player_event' else '连接检查'))
+                self.table.setItem(index,4,QTableWidgetItem(media_sync_caption(existing,row.get('status'))))
                 break
         if self.selected()==aid:self.dashboard.update_media(existing,smooth=True)
     def task(self,key,fn):
@@ -290,11 +304,15 @@ class Window(QMainWindow):
                         identity=(aid,course.get('course_id') or course.get('name'))
                         if course.get('status')=='completed' and course.get('completion_evidence')=='independent_platform_directory' and identity not in self.completion_seen:
                             self.completion_seen.add(identity);self.append_audit({'account':aid,'event':'课程已完成','course':course.get('name')})
+                if current.get('sample_observed_monotonic',0)<self.media_invalidated.get(aid,0):
+                    current.pop('sample',None);current['media_transition']=True;sample={};age=None
                 live=self.live_samples.get(aid,{})
                 if (live.get('chapter_id')==current.get('chapter_id') and live.get('sample') and
+                    live.get('course_id')==current.get('course_id') and
                     live.get('observed_monotonic',0)>current.get('sample_observed_monotonic',0)):
                     sample=live['sample'];age=max(0,now-live['observed_monotonic'])
-                    current.update({k:live[k] for k in ('sample','sample_source','media_progress') if k in live})
+                    current.update({k:live[k] for k in ('sample','sample_source','media_progress','watch_status','watch_enabled') if k in live})
+                    current.pop('media_transition',None)
                     current.update(sample_observed_monotonic=live['observed_monotonic'],sample_age_seconds=age)
                 state=(a.get('status'),current.get('chapter_id'),a.get('attention'),a.get('error_code'))
                 if self.last_states.get(aid)!=state:
@@ -320,7 +338,7 @@ class Window(QMainWindow):
                     '正在核验答案' if a.get('status')=='awaiting_review' else '按课程顺序继续' if a.get('status')=='running' else
                     '正在检查并恢复' if recovering else '选择课程后开始学习')
                 values=[a['account_id'],('课程已完成' if completed else '正在自动恢复' if recovering else '正在完成章节测验' if a.get('attention')=='chapter_quiz' else '正在处理视频弹题' if a.get('attention')=='video_question' else STATUS.get(a['status'],a['status'])),current.get('chapter') or ('已选课程全部完成' if completed else '尚未开始课程'),media if sample else '—',
-                        ('播放已结束 · 待平台确认' if sample.get('ended') else (f'{age:.0f}秒前'+(' · 更新延迟' if age>15 else ' · 实时')) if isinstance(age,(int,float)) else '—'),hint]
+                        media_sync_caption(current,a.get('status')),hint]
                 for j,v in enumerate(values):self.table.setItem(i,j,QTableWidgetItem(str(v)))
                 if a['account_id']==selected:self.table.selectRow(i)
                 if a.get('status')=='running':self.auto_attempts={x for x in self.auto_attempts if x[0]!=a['account_id']}
@@ -386,7 +404,8 @@ class Window(QMainWindow):
                     self.replay_seen.add(identity)
                     self.append_audit({'account':aid,'event':'补播处理','chapter':attempt.get('chapter') or attempt.get('chapter_id'),'replay_status':attempt.get('status')})
 
-            if current.get('sample') and current.get('sample_observed_monotonic',0)>=self.live_samples.get(aid,{}).get('observed_monotonic',0):
+            if (current.get('sample') and current.get('sample_observed_monotonic',0)>=
+                    max(self.live_samples.get(aid,{}).get('observed_monotonic',0),self.media_invalidated.get(aid,0))):
                 self.live_samples[aid]={**current,'observed_monotonic':current.get('sample_observed_monotonic',0)}
         elif key.startswith('媒体采样 '):
             self.live_samples[key.split(' ',1)[1]]=data

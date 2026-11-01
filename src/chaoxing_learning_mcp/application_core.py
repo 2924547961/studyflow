@@ -400,11 +400,13 @@ class ReviewCoordinator:
             if video and previous is not None and not rejected and (not isinstance(previous,dict) or previous.get('correct') is not True):
                 raise ActionError('VIDEO_ANSWER_RESULT_UNKNOWN_NO_REPLAY')
             if video and isinstance(previous,dict) and previous.get('correct') is True:
-                self.adapter.route(account,'answer_video_question',question_token=obs['question_token'],answer=previous['answer'],
+                result=self.adapter.route(account,'answer_video_question',question_token=obs['question_token'],answer=previous['answer'],
                     model_reviewed=False,certain=False,basis='Exact prior platform-confirmed question',
                     repeat_confirmed=not any(o.get('selected') for o in obs['options']))
-                self.adapter.route(account,'resume_learning_batch')
-                return {'status':'prior_answer_confirmed','confirmed':True,'model_used':False}
+                confirmed=result.get('correct') is True
+                if confirmed:self.adapter.route(account,'resume_learning_batch')
+                return {'status':'prior_answer_confirmed' if confirmed else 'repeat_result_unconfirmed',
+                        'confirmed':confirmed,'correct':result.get('correct'),'model_used':False}
             if obs.get('graded') or obs.get('skip_completed_quiz'):
                 self.adapter.route(account,'resume_learning_batch')
                 return {'status':'already_graded'}

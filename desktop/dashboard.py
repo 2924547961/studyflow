@@ -1,6 +1,7 @@
 """Native overview driven only by backend snapshots; no estimated completion."""
 from PyQt6.QtCore import Qt,QPropertyAnimation
 from PyQt6.QtWidgets import QWidget,QFrame,QLabel,QVBoxLayout,QHBoxLayout,QGridLayout,QProgressBar,QPushButton,QLayout,QSizePolicy
+from presentation import media_sync_caption
 
 
 def text(value='',role=''):
@@ -125,5 +126,5 @@ class Dashboard(QWidget):
                 self.video_animation.setStartValue(self.video.value());self.video_animation.setEndValue(target);self.video_animation.start()
             else:self.video.setValue(target)
         age=current.get('sample_age_seconds');source=current.get('sample_source')
-        age_text=('网页事件同步' if source=='player_event' else '连接检查')+(f' · {age:.0f} 秒前' if isinstance(age,(int,float)) else ' · 等待网页')
+        age_text=media_sync_caption(current)
         self.sample.setText(f"{age_text}  ·  {sample.get('playback_rate','—')} 倍速  ·  视频进度不代表平台完成" if sample else '课程完成以平台目录核验为准')

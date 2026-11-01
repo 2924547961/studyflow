@@ -88,3 +88,36 @@ def test_confirmed_review_is_not_replayed_from_stale_cached_attention():
     service.tick({'accounts':[{**row,'current':{'chapter_id':'2'}}]})
     finished(service,list(service.jobs.values())[-1])
     assert service.reviews.review.call_count==2
+
+
+def test_confirmed_popup_reconciles_after_grace_when_running_snapshot_was_missed():
+    service=ApplicationService(Mock());service.auto_review=True;service.cache_only=True
+    service.reviews.review=Mock(return_value={'confirmed':True})
+    row={'account_id':'a','status':'awaiting_review','attention':'video_question','current':{'chapter_id':'1'}}
+    service.tick({'accounts':[row]})
+    job=next(iter(service.jobs.values()));finished(service,job)
+    service.tick({'accounts':[row]})
+    assert service.reviews.review.call_count==1
+    job['finished_at']-=6
+    service.tick({'accounts':[row]})
+    finished(service,list(service.jobs.values())[-1])
+    assert service.reviews.review.call_count==2
+    service.tick({'accounts':[row]})
+    assert service.reviews.review.call_count==2
+
+
+@pytest.mark.parametrize('state,result,error,attention',[
+    ('completed',{'confirmed':False},None,'video_question'),
+    ('completed',{'confirmed':True},None,'chapter_quiz'),
+    ('failed',None,'VIDEO_ANSWER_RESULT_UNKNOWN_NO_REPLAY','video_question'),
+    ('failed',None,'NEEDS_EVIDENCE_OR_REVIEW','video_question'),
+])
+def test_popup_reconciliation_never_unseals_unknown_failed_or_chapter_submission(state,result,error,attention):
+    service=ApplicationService(Mock());service.auto_review=True;service.cache_only=True
+    service.start=Mock()
+    row={'account_id':'a','status':'awaiting_review','attention':attention,'current':{'chapter_id':'1'}}
+    service.tick({'accounts':[row]})
+    service.jobs['old']={'account_id':'a','operation':'review','state':state,'result':result,
+                         'error':error,'finished_at':time.time()-60}
+    service.tick({'accounts':[row]})
+    assert service.start.call_count==1

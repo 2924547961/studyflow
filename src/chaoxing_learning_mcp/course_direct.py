@@ -2073,11 +2073,23 @@ def _read_live_sample():
         last_event=w.get('event_received_at',w.get('event_attached_at',0))
         if now-last_event<15 or now<w.get('live_read_due',0):return
         w['live_read_due']=now+15
+        previous=w.get('sample',{})
         sample=_watch_sample(frame)
         w.setdefault('guard_sample',dict(w.get('sample',{})))
         w.update(sample=sample,sample_observed_monotonic=time.monotonic(),sample_source='event_silence_check',
             fallback_read_count=w.get('fallback_read_count',0)+1)
         w.pop('live_read_error',None)
+        # Repair a lost display subscription only when a read proves that the
+        # same video is progressing. Pauses/buffering are not event failures.
+        if (sample.get('paused') is False and not sample.get('ended')
+                and sample.get('current_time',0)>previous.get('current_time',float('inf'))+.05
+                and w.get('event_token') and w.get('event_rebind_count',0)<2
+                and now-w.get('event_rebind_at',0)>=30):
+            w.update(event_rebind_at=now,event_rebind_count=w.get('event_rebind_count',0)+1)
+            try:
+                from .media_events import attach
+                attach(_state,page,frame)
+            except Exception as exc:w['event_rebind_error']=type(exc).__name__
         if (sample.get('paused') or sample.get('ended')) and w.get('status') not in ('question_requires_review','awaiting_verification'):
             w['due']=min(w.get('due',now),now)
     except Exception as exc:
@@ -2685,17 +2697,27 @@ def desktop_report_state(client_state: dict):
 def refresh_desktop_implementation():
     """Update the local GUI gateway while preserving pairing and all account runtimes."""
     import importlib
-    from . import desktop_gateway, parallel_runner
+    from . import desktop_gateway, parallel_runner, media_stream
     with _operation_lock:
         importlib.reload(desktop_gateway)
+        importlib.reload(media_stream)
         from . import application_service
         service=application_service._service
         service_updated=False
         if service is not None:
             with service.lock:
                 if not service.active:
+                    from . import application_core
+                    # Coordinator instances contain locks and attempted-write
+                    # fences. Upgrade their methods, never replace that state.
+                    errors={name:getattr(application_core,name) for name in ('ActionError','EvidenceReviewError')}
+                    importlib.reload(application_core)
+                    application_core.__dict__.update(errors)
                     importlib.reload(application_service)
                     service.__class__=application_service.ApplicationService
+                    service.reviews.__class__=application_core.ReviewCoordinator
+                    service.exams.__class__=application_core.ExamCoordinator
+                    service.recovery.__class__=application_core.RecoveryCoordinator
                     service_updated=True
         desktop_gateway.install_handler()
         if not parallel_runner._active and not parallel_runner._sessions and not (parallel_runner._loop and parallel_runner._loop.is_running()):

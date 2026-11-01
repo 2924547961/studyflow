@@ -38,7 +38,7 @@ def test_course_selection_requires_explicit_start_and_routes_only_selected_cours
     w.course_lists['fixture']=['课程甲','课程乙'];w.render_courses()
     assert not w.start_queue_button.isEnabled()
     w.course_list.item(1).setCheckState(Qt.CheckState.Checked)
-    assert w.start_queue_button.isEnabled() and '1门' in w.start_queue_button.text()
+    assert w.start_queue_button.isEnabled() and '1门' in w.start_queue_button.text().replace(' ','')
     w.adapter.call.assert_not_called()
     w.adapter.call.return_value={'ok':True,'results':[{'account_id':'fixture','status':'starting'}]}
     def task(key,fn):
@@ -61,7 +61,8 @@ def test_failures_remain_visible_and_duplicate_browser_clicks_are_disabled():
     w.done('启动账号:fixture',{'ok':False,'error_code':'CLOSED_BROWSER_REQUIRES_OUTCOME_REVIEW'})
     assert '待确认提交' in w.account_feedback.text()
     w.busy.add('启动账号:fixture');w.update_actions()
-    assert all(not b.isEnabled() for b in w.account_actions if b.text() in ('启动账号','打开账号浏览器','返回后台学习'))
+    protected=[w.account_toggle,*[b for b in w.account_actions if b.text()=='显示学习网页']]
+    assert len(protected)==2 and all(not b.isEnabled() for b in protected)
     w.busy.clear();w.done('启动账号:fixture',{'ok':True,'browser_replaced':False})
     assert '浏览器已打开' in w.account_feedback.text()
     w.done('启动队列:fixture',{'ok':True,'results':[{'account_id':'fixture','status':'reused','worker_status':'stopped'}]})

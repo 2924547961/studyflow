@@ -80,10 +80,12 @@ def test_two_required_videos_play_and_finish_in_dom_order(monkeypatch,tmp_path):
                   let f=document.createElement('iframe');f.src='/video/'+n;f.setAttribute('data',JSON.stringify({objectid:String(n),_jobid:'job'+n}));
                   a.append(f);document.body.prepend(a);}</script>''')
             context.route('**/*',route)
-            page=context.new_page();page.goto('https://fixture.chaoxing.com/lesson')
+            page=context.new_page();page.goto('https://fixture.chaoxing.com/lesson?chapterId=one&courseid=1&clazzid=2')
             page.wait_for_function("Array.from(document.querySelectorAll('iframe')).every(f=>f.contentDocument.querySelector('video')?.readyState>=1)")
             monkeypatch.setattr(d,'_state',{'page':page,'browser':browser,'generation':'offline-fixture','headless':True,
                 'requested_playback_rate':1.25,'account_id':'fixture','watch_service_running':True})
+            from chaoxing_learning_mcp import batch_runner
+            monkeypatch.setattr(batch_runner,'_state',{'current':{'account_id':'fixture','chapter_id':'one','course_id':'courseid:1:clazzid:2'}})
             monkeypatch.setattr(d,'_run',lambda fn:fn())
             monkeypatch.setattr(d,'_jobs',queue.Queue())
             monkeypatch.setattr(d,'_check_gates',lambda _:None)
@@ -103,12 +105,16 @@ def test_two_required_videos_play_and_finish_in_dom_order(monkeypatch,tmp_path):
                 assert d._state['video_watch']['event_received_count']>0
                 assert d._state['video_watch']['sample_source']=='player_event'
                 assert d._state['video_watch'].get('fallback_read_count',0)==0
+                cached=batch_runner.learning_batch_status(media_only=True)['current']
+                assert cached['media_progress']['next_video_number']==number
+                assert cached['sample']['current_time']>0
                 d._watch_tick()
                 assert d._state['video_watch']['enabled']  # completed sibling must not stop video 2
                 deadline=time.monotonic()+8
                 while d._state['video_watch']['enabled'] and time.monotonic()<deadline:
                     page.wait_for_timeout(100);d._watch_tick()
                 assert d._state['video_watch']['status']=='ended_needs_task_confirmation'
+                assert batch_runner.learning_batch_status(media_only=True)['current']['watch_status']=='ended_needs_task_confirmation'
                 inventory=d.inspect_owned_media_tasks()
                 assert inventory['completed_video_count']==number
                 assert inventory['all_required_completed']==(number==2)

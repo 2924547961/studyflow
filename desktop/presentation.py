@@ -48,6 +48,20 @@ def media_caption(sample,progress=None):
     duration=f'{duration:.0f}' if isinstance(duration,(int,float)) else '—'
     return prefix+f"{position} / {duration}s · {sample.get('playback_rate','—')}×"
 
+
+def media_sync_caption(current,task_status=None):
+    sample=current.get('sample') or {};watch=current.get('watch_status');age=current.get('sample_age_seconds')
+    if watch=='ended_needs_task_confirmation':return '正在核验完成并衔接下一任务'
+    if watch=='awaiting_verification' or (not watch and task_status=='awaiting_verification'):return '已暂停 · 等待本人验证'
+    if watch=='question_requires_review' or (not watch and task_status=='awaiting_review'):return '已暂停 · 正在处理题目'
+    if watch in ('page_changed','verification_passed_needs_task_resume') or current.get('media_transition'):return '正在衔接当前任务'
+    if watch=='buffering':return '视频缓冲 · 正在自动检查'
+    if sample.get('ended'):return '播放已结束 · 待平台确认'
+    if sample.get('paused'):return '播放已暂停 · 后台检查中'
+    if isinstance(age,(int,float)) and age>15:return f'{age:.0f}秒前 · 同步延迟，后台校验中'
+    if current.get('sample_source')=='player_event':return '网页事件同步'
+    return '连接检查' if sample else '等待当前任务'
+
 def readable_event(event):
     name=event.get('event','事件');result=event.get('result') or {}
     titles={'control_owned_video':'读取播放进度','observe_chapter_quiz':'读取章节测验','observe_video_question':'读取弹题',

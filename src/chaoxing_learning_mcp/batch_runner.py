@@ -78,19 +78,26 @@ def _save():
             os.replace(temporary,target)
 
 
+def _watch_matches_current(direct,watch,current):
+    query={k.lower():v for k,v in parse_qs(urlparse(watch.get('page_url','')).query).items()}
+    expected=dict(re.findall(r'(courseid|clazzid):([^:]+)',current.get('course_id','') or ''))
+    return (direct._state.get('account_id')==current.get('account_id')
+            and query.get('chapterid')==[str(current.get('chapter_id'))]
+            and all(query.get(k)==[v] for k,v in expected.items()))
+
+
 def learning_batch_status(media_only: bool = False) -> dict:
     """Cached compact state only; no page reads, HTTP calls or model API."""
     if media_only:
         from . import course_direct as direct
         watch=direct._state.get('video_watch',{});current=_state.get('current') or {}
-        query={k.lower():v for k,v in parse_qs(urlparse(watch.get('page_url','')).query).items()}
-        if (not watch.get('sample') or query.get('chapterid')!=[str(current.get('chapter_id'))]
-                or direct._state.get('account_id')!=current.get('account_id')):return {'current':None}
+        if not watch.get('sample') or not _watch_matches_current(direct,watch,current):return {'current':None}
         observed=watch.get('sample_observed_monotonic',0)
         return {'account_id':current['account_id'],'current':{
             'chapter_id':current['chapter_id'],'course_id':current.get('course_id'),
             'sample':copy.deepcopy(watch['sample']),'sample_observed_monotonic':observed,
             'sample_age_seconds':max(0,time.monotonic()-observed),
+            'watch_status':watch.get('status'),'watch_enabled':watch.get('enabled'),
             'sample_source':watch.get('sample_source'),'media_progress':copy.deepcopy(watch.get('media_progress',{}))}}
     with _lock:result=copy.deepcopy(_snapshot)
     result['dispatcher_alive']=bool(_thread and _thread.is_alive())
@@ -111,9 +118,7 @@ def learning_batch_status(media_only: bool = False) -> dict:
     if current:
         from . import course_direct as d
         watch=d._state.get('video_watch',{})
-        query={k.lower():v for k,v in parse_qs(urlparse(watch.get('page_url','')).query).items()}
-        if (d._state.get('account_id')==current.get('account_id') and
-                query.get('chapterid')==[str(current.get('chapter_id'))] and watch.get('sample')):
+        if _watch_matches_current(d,watch,current) and watch.get('sample'):
             current['sample']=copy.deepcopy(watch['sample'])
             if watch.get('media_progress'):current['media_progress']=copy.deepcopy(watch['media_progress'])
             observed=watch.get('sample_observed_monotonic')
@@ -122,6 +127,8 @@ def learning_batch_status(media_only: bool = False) -> dict:
             current['sample_source']=watch.get('sample_source','initial_read')
             current['sync_events']=watch.get('event_received_count',0)
             current['fallback_reads']=watch.get('fallback_read_count',0)
+            current['watch_status']=watch.get('status')
+            current['watch_enabled']=watch.get('enabled')
         current['sample_is_cached']=True
     from .hourly_reports import reporter
     result['recent_grades']=[]

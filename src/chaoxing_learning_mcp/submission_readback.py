@@ -50,7 +50,9 @@ def recover_chapter_submission_readback(account_id:str):
             if not result.get('grading_complete'):return {'recovered':False,'reason':'GRADING_PENDING','submission_replayed':False}
             d._state['submit_attempted']=False
             d._worker_failed=False
-            d._report_quiz(url,result)
+            # The released current-run plan and submit flag prove provenance.
+            # A timed-out caller never reached its ordinary report registration.
+            d._report_quiz(url,result,submitted=True)
             return {'recovered':True,'grading':result,'submission_replayed':False,'browser_restarted':False}
         d._jobs.put((probe,(),{},done))
         try:ok,result=done.get(timeout=12)

@@ -33,6 +33,7 @@ def test_exact_confirmation_releases_only_after_complete_grading(monkeypatch,sce
     result=recover('fixture')
     assert result['recovered'] and not result['submission_replayed']
     assert not d._worker_failed and not d._state['submit_attempted']
+    d._report_quiz.assert_called_once_with(scene.url,result['grading'],submitted=True)
     scene.locator.assert_not_called()
 
 @pytest.mark.parametrize('mode',['pending','mismatch','busy','ambiguous'])

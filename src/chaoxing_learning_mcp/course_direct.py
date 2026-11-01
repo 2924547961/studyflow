@@ -529,11 +529,10 @@ def submit_chapter_quiz(plan_id: str, observation_id: str) -> dict[str, Any]:
         if count != len(answers):
             raise ValueError(f"frame shows {count} questions, plan covers {len(answers)}")
         def _row_letter(row) -> str:
-            span = row.locator("span.num_option, span.num_option_dx").first
-            if span.count():
-                return span.inner_text(timeout=5000).strip().upper()[:1]
-            node = row.locator("input[type=checkbox], input[type=radio]").first
-            value = str(node.get_attribute("value") or "").strip().lower() if node.count() else ""
+            # Read the observed row once: a rerender between count() and
+            # inner_text() otherwise waits for a label that no longer exists.
+            value = row.evaluate("r=>r.querySelector('span.num_option, span.num_option_dx')?.textContent || r.querySelector('input[type=checkbox], input[type=radio]')?.value || ''")
+            value = str(value).strip().lower()
             # true/false rows carry "true"/"false"; normal choice rows carry the letter.
             if value in ("true", "false"):
                 return {"true": "A", "false": "B"}[value]
@@ -647,6 +646,8 @@ def submit_chapter_quiz(plan_id: str, observation_id: str) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         _log("submit_click", "aborted", elapsed_ms=int((time.monotonic() - started) * 1000),
              error=f"{type(exc).__name__}: {exc}")
+        if not _worker_failed and not _state.get('submit_attempted') and course_extension._pending is pending:
+            pending['pre_submit_aborted']=True
         raise
     tab_id = f"direct:{_state.get('account_id')}"
     result = course_extension.confirm_course_quiz(plan_id, tab_id, _BROWSER_ID,
@@ -2697,10 +2698,11 @@ def desktop_report_state(client_state: dict):
 def refresh_desktop_implementation():
     """Update the local GUI gateway while preserving pairing and all account runtimes."""
     import importlib
-    from . import desktop_gateway, parallel_runner, media_stream
+    from . import desktop_gateway, parallel_runner, media_stream, worker_readback
     with _operation_lock:
         importlib.reload(desktop_gateway)
         importlib.reload(media_stream)
+        importlib.reload(worker_readback)
         from . import application_service
         service=application_service._service
         service_updated=False

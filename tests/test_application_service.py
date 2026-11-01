@@ -15,6 +15,67 @@ def finished(service, job):
         time.sleep(.01)
     raise AssertionError('Job did not finish')
 
+def test_pending_original_review_is_rechecked_then_resumes_without_resubmission():
+    adapter=Mock();pending=[True]
+    def route(account,tool,**args):
+        if tool=='runtime_health':return {'pending_review':pending[0]}
+        if tool=='inspect_current_task':return {'task_state':'video_completed'}
+        return {}
+    adapter.route.side_effect=route
+    service=ApplicationService(adapter);service.reviews.review=Mock()
+    job=service.start('a','recover');first=finished(service,job)
+    assert first['result']['deferred'] is True
+    assert [c.args[1] for c in adapter.route.call_args_list]==['runtime_health','recover_chapter_submission_readback']
+    row={'account_id':'a','status':'awaiting_review','attention':'chapter_quiz','current':{'chapter_id':'1'}}
+    service.tick({'accounts':[row]});assert len(service.jobs)==1
+    pending[0]=False;service.jobs[job['id']]['finished_at']-=6
+    service.tick({'accounts':[row]});second=finished(service,list(service.jobs.values())[-1])
+    assert second['result']['resumed'] is True
+    tools=[c.args[1] for c in adapter.route.call_args_list]
+    assert tools.count('resume_learning_batch')==1
+    assert not any('submit' in t or 'answer' in t for t in tools)
+    service.reviews.review.assert_not_called()
+    service.tick({'accounts':[{**row,'status':'running'}]});assert len(service.jobs)==2
+
+
+def test_pre_submit_recovery_unseals_only_the_exact_account_and_questions():
+    service=ApplicationService(Mock())
+    service.reviews.attempted={('a',('one',)),('a',('other',)),('b',('one',))}
+    service.auto_attempts={('a','scene'),('b','scene')}
+    service.recovery.auto_repair=Mock(return_value={'safe_to_review_again':True,'question_fingerprints':['one']})
+    job=service.start('a','recover');finished(service,job)
+    assert service.reviews.attempted=={('a',('other',)),('b',('one',))}
+    assert service.auto_attempts=={('b','scene')}
+
+
+def test_deferred_recovery_does_not_restart_stopped_account_or_failed_job():
+    service=ApplicationService(Mock());service.start=Mock()
+    job={'account_id':'a','operation':'recover','state':'completed','finished_at':time.time()-60,
+         'result':{'recovery_kind':'pending_review','deferred':True}}
+    service.jobs['previous']=job
+    service.tick({'accounts':[{'account_id':'a','status':'stopped','current':{}}]})
+    job['state']='failed'
+    service.tick({'accounts':[{'account_id':'a','status':'awaiting_review','current':{}}]})
+    service.start.assert_not_called()
+
+
+@pytest.mark.parametrize('reason,deferred',[
+    ('ORIGINAL_OWNER_NOT_IDLE',True),('READBACK_PENDING',True),('GRADING_PENDING',True),
+    ('GRADING_IDENTITY_MISMATCH',False)])
+def test_late_submission_schedules_readback_only_after_current_check_finishes(reason,deferred):
+    from chaoxing_learning_mcp.application_core import RecoveryCoordinator
+    adapter=Mock();adapter.route.side_effect=lambda a,t,**kw:(
+        {'unknown_submission':True} if t=='runtime_health' else {'recovered':False,'reason':reason})
+    result=RecoveryCoordinator(adapter).auto_repair('a')
+    assert result['deferred'] is deferred
+    service=ApplicationService(adapter);service.start=Mock()
+    service.jobs['previous']={'account_id':'a','operation':'recover','state':'completed',
+                             'finished_at':time.time()-6,'result':result}
+    service.tick({'accounts':[{'account_id':'a','status':'awaiting_review','current':{}}]})
+    assert service.start.call_count==int(deferred)
+    assert [c.args[1] for c in adapter.route.call_args_list]==['runtime_health','recover_chapter_submission_readback']
+
+
 def test_model_discovery_does_not_apply_or_choose_and_public_state_has_no_key():
     service=ApplicationService(Mock())
     with patch('chaoxing_learning_mcp.application_service.discover_models',return_value=['first','second']):

@@ -34,6 +34,10 @@ def clock(value):
     value=max(0,int(value));return f'{value//60:02d}:{value%60:02d}'
 
 
+def running_account_count(rows):
+    return sum(row.get('status') in ('running','awaiting_review') for row in rows)
+
+
 def media_caption(sample,progress=None):
     progress=progress or {};count=progress.get('required_video_count',0)
     prefix=''

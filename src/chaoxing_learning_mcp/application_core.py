@@ -703,15 +703,26 @@ class RecoveryCoordinator:
         if health.get('unknown_submission'):
             result=self.adapter.route(aid,'recover_chapter_submission_readback')
             result['recovery_kind']='submission_readback'
+            result['deferred']=bool(not result.get('recovered') and result.get('reason') in
+                                    ('ORIGINAL_OWNER_NOT_IDLE','READBACK_PENDING','GRADING_PENDING'))
             if result.get('recovered'):
                 self.adapter.route(aid,'resume_learning_batch')
                 result['message']='原提交已核验评分，自动接续；未重交。'
                 result['resumed']=True
             return result
-        if health.get('pending_review'):return {'message':'原审阅仍在处理中，保留计划并等待回执。'}
+        if health.get('pending_review'):
+            result=self.adapter.route(aid,'recover_chapter_submission_readback')
+            if result.get('safe_to_review_again') is True:return result
+            if result.get('reason') in ('PRE_SUBMIT_RECOVERY_EXHAUSTED','PRE_SUBMIT_SCENE_CHANGED'):
+                return {**result,'message':'提交前页面已变化或恢复已尝试，保留计划和具体诊断。'}
+            return {'message':'原审阅仍在处理中，保留计划并等待回执。',
+                    'recovery_kind':'pending_review','deferred':True,'retry_after_seconds':5}
         if health.get('browser_worker_failed'):
             result=self.adapter.route(aid,'recover_current_task',recover_read_worker=True)
-            if not result.get('ok'):return {'message':'原线程探测待处理：'+str(result.get('error_code'))}
+            if not result.get('ok'):
+                deferred=result.get('error_code') in ('ORIGINAL_OWNER_STILL_UNRESPONSIVE','READ_WORKER_PROBE_ALREADY_ATTEMPTED')
+                return {'message':'原线程探测待处理：'+str(result.get('error_code')),
+                        'recovery_kind':'pending_read_worker','deferred':deferred,'retry_after_seconds':5}
             return self.recover_after_status_fault(aid)
         task=self.adapter.route(aid,'inspect_current_task')
         if task.get('teacher_quiz_unavailable'):

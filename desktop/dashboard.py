@@ -1,7 +1,7 @@
 """Native overview driven only by backend snapshots; no estimated completion."""
 from PyQt6.QtCore import Qt,QPropertyAnimation
 from PyQt6.QtWidgets import QWidget,QFrame,QLabel,QVBoxLayout,QHBoxLayout,QGridLayout,QProgressBar,QPushButton,QLayout,QSizePolicy
-from presentation import media_sync_caption
+from presentation import media_sync_caption,running_account_count
 
 
 def text(value='',role=''):
@@ -90,7 +90,7 @@ class Dashboard(QWidget):
                 remaining=course.get('progress',{}).get('remaining')
                 if isinstance(remaining,(int,float)):known.append(remaining)
                 else:unknown+=1
-        numbers=[str(len(values)),str(sum(r.get('status') in ('running','awaiting_review') for r in values)),
+        numbers=[str(len(values)),str(running_account_count(values)),
             (('≥ ' if unknown else '')+str(sum(known))) if known else '—',str(sum(bool(r.get('user_action_required')) for r in values))]
         for widget,value in zip(self.metrics,numbers):widget.setText(value)
         self.empty.setVisible(not values)

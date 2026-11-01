@@ -15,7 +15,7 @@ from service_client import ApplicationClient,ModelSelection
 from theme import STYLE
 from ui import build_ui
 from core import audit_data
-from presentation import PRESETS,readable_event,import_profile,export_profile,media_caption,media_sync_caption
+from presentation import PRESETS,readable_event,import_profile,export_profile,media_caption,media_sync_caption,running_account_count
 
 STATUS={'running':'运行中','starting':'启动中','awaiting_review':'正在处理题目',
         'awaiting_verification':'等待本人验证','blocked':'需要检查','completed':'已完成','stopped':'已暂停',
@@ -351,7 +351,7 @@ class Window(QMainWindow):
                         self.auto_attempts.add(identity);self.start_review(a['account_id'],a['attention'],extra,attached)
             self.table.blockSignals(False)
             self.banner.setText(f"已连接 · {len(accounts)} 个独立账号 · 更新于 {time.strftime('%H:%M:%S')} · 页面由事件 / 预计结束时间调度")
-            self.summary.setText(f"账号 {len(accounts)}   ·   运行 {sum(a.get('status')=='running' for a in accounts)}   ·   本人验证 {sum(a.get('user_action_required',False) for a in accounts)}")
+            self.summary.setText(f"账号 {len(accounts)}   ·   运行 {running_account_count(accounts)}   ·   本人验证 {sum(a.get('user_action_required',False) for a in accounts)}")
             if selected != self.selected():self.render_courses();self.details()
             self.update_actions()
             self.dashboard.update_snapshot(self.rows,self.selected(),self.backend_snapshot)

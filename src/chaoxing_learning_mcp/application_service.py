@@ -135,6 +135,10 @@ class ApplicationService:
         try:
             if operation=='recover':
                 result=self.recovery.auto_repair(account)
+                if result.get('safe_to_review_again') is True:
+                    key=(account,tuple(result['question_fingerprints']))
+                    with self.reviews.guard:self.reviews.attempted.discard(key)
+                    with self.lock:self.auto_attempts={x for x in self.auto_attempts if x[0]!=account}
                 for _ in range(6):
                     if (result.get('recovery_kind')!='submission_readback' or result.get('recovered')
                             or result.get('reason') not in ('ORIGINAL_OWNER_NOT_IDLE','READBACK_PENDING','GRADING_PENDING')):break
@@ -184,6 +188,18 @@ class ApplicationService:
             with self.lock:
                 if account in self.active:continue
                 if row.get('status')=='running':self.auto_attempts={x for x in self.auto_attempts if x[0]!=account}
+                previous=next((j for j in reversed(list(self.jobs.values()))
+                               if j['account_id']==account),{})
+            prior_result=previous.get('result') or {}
+            if (row.get('status') in ('awaiting_review','blocked')
+                    and previous.get('operation')=='recover' and previous.get('state')=='completed'
+                    and prior_result.get('recovery_kind') in ('pending_review','pending_read_worker','submission_readback') and prior_result.get('deferred') is True
+                    and time.time()-previous.get('finished_at',time.time())>=5):
+                # The original worker may finish after the RPC caller timed out.
+                # Recheck its health/result; never restart the model or submission.
+                try:self.start(account,'recover')
+                except ActionError:pass
+                continue
             fault=(row.get('status')=='blocked' and (row.get('error_code') in ('TASK_INSPECTION_REQUIRED','TRANSIENT_RECOVERY_EXHAUSTED')
                 or row.get('attention')=='Playback needs inspection'
                 or str(row.get('attention','')).startswith('Video ended; confirm platform directory')))

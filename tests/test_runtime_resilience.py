@@ -44,6 +44,18 @@ def test_critical_guards_never_retried(text):
     assert r.backoff({},'task',ValueError(text)) is None
 
 
+@pytest.mark.parametrize('pending',[False,True])
+def test_popup_at_initial_play_routes_to_review_without_replay(monkeypatch,pending):
+    monkeypatch.setattr(b,'_state',dict(status='running',current={'chapter_id':'c'}))
+    monkeypatch.setattr(b,'_save',Mock())
+    monkeypatch.setattr(d,'_state',{'submit_attempted':pending})
+    monkeypatch.setattr(d.course_extension,'_pending',None)
+    b._handle_failure(ValueError('Visible video question requires review; use observe_video_question'))
+    assert b._state['status']==('blocked' if pending else 'awaiting_review')
+    if not pending:
+        assert b._state['attention']=='video_question' and not b._state['user_action_required']
+
+
 def test_batch_pending_review_never_auto_retries(monkeypatch):
     monkeypatch.setattr(b,'_state',dict(status='running',current={'chapter_id':'c'}))
     monkeypatch.setattr(b,'_save',lambda:None)

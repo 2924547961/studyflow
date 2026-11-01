@@ -360,8 +360,12 @@ def inspect_current_task() -> dict:
 
 
 def _recover_read_worker(d, cancel_hung_play_wait=False):
-    from .worker_readback import recover_read_worker
-    return recover_read_worker(d,cancel_hung_play_wait)
+    import importlib
+    from . import worker_readback
+    # Recovery rules are stateless; load fixes without replacing the owner or
+    # relaxing its unresolved-operation fence during an ordinary hot upgrade.
+    importlib.reload(worker_readback)
+    return worker_readback.recover_read_worker(d,cancel_hung_play_wait)
 
 
 def recover_current_task(renew_session: bool = False, recover_read_worker: bool = False,
@@ -640,7 +644,9 @@ def _step_impl():
         d.monitor_owned_video('stop')
         _state['current']['sample']=result.get('sample',{});_save();_wake.set();return
     if result.get('status')=='review_required':
-        _attention('awaiting_review',result.get('next_action','Inspect remaining task cards'));return
+        action=result.get('next_action','Inspect remaining task cards')
+        _attention('awaiting_review',{'observe_video_question':'video_question',
+                   'observe_chapter_quiz':'chapter_quiz'}.get(action,action));return
     if result['sample'].get('playback_rate')!=_rate:
         _attention('blocked','REQUESTED_PLAYBACK_RATE_NOT_APPLIED');return
     if not result['sample'].get('paused') and not result['sample'].get('ended'):
@@ -657,6 +663,9 @@ def _handle_failure(exc):
     key=tuple(str(current.get(k,'')) for k in ('account_id','course_id','chapter_id'))
     # Retry only the READ/inspection queue path, never a pending write or review.
     guarded=d._state.get('submit_attempted') or d.course_extension._pending
+    if not guarded and str(exc)=='Visible video question requires review; use observe_video_question':
+        _state.pop('error_code',None);_state.pop('error_type',None)
+        _attention('awaiting_review','video_question');return
     delay=None if guarded else backoff(_state,key,exc)
     if delay is not None:
         _state.update(status='retrying',retry_due=time.monotonic()+delay,

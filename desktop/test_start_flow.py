@@ -7,6 +7,19 @@ from app import Window
 
 _app=QApplication.instance() or QApplication([])
 
+def test_summary_and_dashboard_count_reviewing_accounts_consistently():
+    w=Window();w.timer.stop();w.task=Mock()
+    rows=[{'account_id':'playing','status':'running','current':{}},
+          {'account_id':'reviewing','status':'awaiting_review','current':{}},
+          {'account_id':'paused','status':'stopped','current':{}}]
+    for status,expected in [('awaiting_review','2'),('stopped','1'),('running','2')]:
+        rows[1]['status']=status
+        w.done('status',{'accounts':rows})
+        assert ('运行 '+expected) in w.summary.text()
+        assert w.dashboard.metrics[1].text()==expected
+    w.exit_requested=True;w.close()
+
+
 def test_queued_poll_after_close_never_submits_to_shutdown_executor():
     w=Window();w.timer.stop();w.adapter=Mock();w.exit_requested=True;w.close()
     fn=Mock();w.task('late',fn);w.poll();_app.processEvents()

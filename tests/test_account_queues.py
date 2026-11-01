@@ -61,6 +61,7 @@ def test_unresponsive_read_worker_remains_locked(monkeypatch):
     import queue
     class NoReply:
         def get(self,timeout):raise queue.Empty
+        def get_nowait(self):raise queue.Empty
     monkeypatch.setattr(queue,'Queue',lambda **kwargs:NoReply())
     owner=SimpleNamespace(_state={'page':object(),'submit_attempted':False},
         course_extension=SimpleNamespace(_pending=None),_worker_failed=True,
@@ -69,6 +70,54 @@ def test_unresponsive_read_worker_remains_locked(monkeypatch):
     assert b._recover_read_worker(owner)['error_code']=='ORIGINAL_OWNER_STILL_UNRESPONSIVE'
     assert owner._worker_failed is True
     assert b._recover_read_worker(owner)['error_code']=='READ_WORKER_PROBE_ALREADY_ATTEMPTED'
+
+
+def test_late_read_probe_is_consumed_without_enqueuing_or_replaying(monkeypatch):
+    import queue
+    reply=queue.Queue();reply.put((True,True));jobs=Mock()
+    owner=SimpleNamespace(_state={'read_worker_probe_attempted':True,'read_worker_probe_failure_ts':'new',
+        'read_worker_probe_done':reply},course_extension=SimpleNamespace(_pending=None),_worker_failed=True,
+        _worker=SimpleNamespace(is_alive=lambda:True),_jobs=jobs,
+        _LOG=[{'stage':'inspect_owned_page','ts':'new','outcome':'failed','error':'outcome unknown'}])
+    assert b._recover_read_worker(owner)['operation_replayed'] is False
+    assert not owner._worker_failed; jobs.put.assert_not_called()
+
+
+@pytest.mark.parametrize('latest,accepted',[('control_owned_video',True),('submit_click',False)])
+def test_new_failure_is_not_masked_by_an_old_read_probe(latest,accepted):
+    jobs=Mock();jobs.put.side_effect=lambda job:job[3].put((True,job[0]()))
+    owner=SimpleNamespace(_state={'page':SimpleNamespace(is_closed=lambda:False),
+        'read_worker_probe_attempted':True,'read_worker_probe_failure_ts':'old'},
+        course_extension=SimpleNamespace(_pending=None),_worker_failed=True,
+        _worker=SimpleNamespace(is_alive=lambda:True),_jobs=jobs,
+        _LOG=[{'stage':'inspect_owned_page','ts':'old','outcome':'failed','error':'outcome unknown'},
+              {'stage':latest,'ts':'new','outcome':'failed','error':'outcome unknown'}])
+    assert b._recover_read_worker(owner)['ok'] is accepted
+    assert jobs.put.call_count==int(accepted)
+
+
+@pytest.mark.parametrize('change,accepted',[
+    ({},True),({'correct':False,'outcome':'readback_pending'},True),
+    ({'correct':None},False),({'busy':1},False),({'token':'other'},False),
+    ({'control_click_completed':False},False),({'before':True},False),({'duplicate':True},False)])
+def test_late_video_grade_unlocks_owner_without_answer_replay(change,accepted):
+    jobs=Mock(unfinished_tasks=change.get('busy',0))
+    jobs.put.side_effect=lambda job:job[3].put((True,job[0]()))
+    receipt={'stage':'video_question_submit','question_token':'q','answer':'A',
+             'outcome':change.get('outcome','confirmed_correct')}
+    failure={'stage':'answer_video_question','ts':'new','outcome':'failed','error':'outcome unknown'}
+    log=[receipt,failure] if change.get('before') else [failure,receipt]
+    if change.get('duplicate'):log.append(receipt.copy())
+    owner=SimpleNamespace(_state={'page':SimpleNamespace(is_closed=lambda:False),
+        'video_question_attempts':{'q':{'question_token':change.get('token','q'),
+        'correct':change.get('correct',True),'answer':'A','submitted_once':True,
+        'control_click_completed':change.get('control_click_completed',True)}}},
+        course_extension=SimpleNamespace(_pending=None),_worker_failed=True,
+        _worker=SimpleNamespace(is_alive=lambda:True),_jobs=jobs,_LOG=log)
+    result=b._recover_read_worker(owner)
+    assert result['ok'] is accepted and owner._worker_failed is (not accepted)
+    assert jobs.put.call_count==int(accepted)
+    if accepted:assert result['operation_replayed'] is False
 
 
 @pytest.mark.parametrize('action,accepted',[('play',True),('submit',False)])

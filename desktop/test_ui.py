@@ -11,6 +11,56 @@ from theme import STYLE
 
 
 class UITests(unittest.TestCase):
+    def test_account_guidance_separates_connection_from_learning_and_unifies_pause(self):
+        w=Window();w.timer.stop();w.adapter=Mock();w.task=Mock()
+        row={'account_id':'fixture','status':'ready','current':{}}
+        w.done('status',{'accounts':[row]});w.browser_live['fixture']=True;w.update_actions()
+        self.assertIn('账号连接：已连接',w.account_summary.text())
+        self.assertIn('选择课程',w.account_summary.text());self.assertFalse(w.queue_toggle.isEnabled())
+        row.update(status='running',current={'chapter':'示例章节','chapter_id':'1'});w.update_actions()
+        self.assertEqual(w.queue_toggle.text(),'暂停学习');self.assertIn('示例章节',w.account_summary.text())
+        w.toggle_learning();self.assertEqual(w.task.call_args.args[0],'队列操作:fixture')
+        w.task.call_args.args[1]();w.adapter.route.assert_called_with('fixture','stop_learning_batch')
+        row['status']='stopped';w.update_actions();self.assertEqual(w.queue_toggle.text(),'继续上次学习')
+        w.close()
+
+    def test_media_push_updates_immediately_and_older_status_cannot_roll_it_back(self):
+        w=Window();w.timer.stop();w.task=Mock()
+        row={'account_id':'fixture','status':'running','current':{'chapter_id':'one','course_id':'course','sample':{'current_time':1,'duration':100}}}
+        w.done('status',{'accounts':[row]})
+        import time
+        current={'chapter_id':'one','course_id':'course','sample_observed_monotonic':time.monotonic(),
+            'sample_source':'player_event','sample':{'current_time':13,'duration':100,'paused':False,'playback_rate':1}}
+        w.update_media({'account_id':'fixture','current':current})
+        self.assertEqual(w.dashboard.media_time.text(),'00:13 / 01:40')
+        w.done('实时进度:fixture',{'current':{**current,'sample_observed_monotonic':1,'sample':{'current_time':2}}})
+        self.assertEqual(w.live_samples['fixture']['sample']['current_time'],13)
+        w.update_media({'account_id':'fixture','current':{**current,'chapter_id':'old','sample':{'current_time':99}}})
+        self.assertEqual(w.dashboard.media_time.text(),'00:13 / 01:40')
+        w.close()
+
+    def test_model_list_never_selects_first_item_or_applies_draft(self):
+        w=Window();w.timer.stop();w.task=Mock()
+        self.assertEqual(w.provider.currentIndex(),-1);self.assertEqual(w.endpoint.text(),'')
+        w.provider.setCurrentText('DeepSeek')
+        w.done('模型列表',{'provider':'DeepSeek','config':{'endpoint':'https://example.com','model':''},'models':['first','second']})
+        self.assertEqual(w.model_name.currentText(),'');self.assertIsNone(w.model)
+        w.application=Mock();w.configure_model();w.application.call.assert_not_called()
+        w.close()
+
+    def test_overview_shows_unknown_progress_and_switches_to_existing_account_controls(self):
+        w=Window();w.timer.stop();w.task=Mock()
+        w.done('status',{'accounts':[{'account_id':'fixture','status':'ready','current':{}}]})
+        self.assertEqual(w.dashboard.metrics[2].text(),'—')
+        w.select_dashboard_account('fixture')
+        self.assertEqual(w.selected(),'fixture');self.assertEqual(w.nav.currentRow(),1)
+        w.close()
+
+    def test_theme_has_no_unexpanded_or_prefix_corrupted_tokens(self):
+        import re
+        self.assertNotIn('@',STYLE)
+        for color in re.findall(r':\s*(#[0-9a-fA-F]+\w*)',STYLE):self.assertRegex(color,r'^#[0-9a-fA-F]{6}$')
+
     def test_delayed_recovery_for_stopped_account_does_not_start_browser_or_queue(self):
         w=Window();w.timer.stop();w.task=Mock();w.adapter=Mock()
         w.adapter.route.return_value={'state':'not_started'}
@@ -84,7 +134,7 @@ class UITests(unittest.TestCase):
     def test_help_is_bundled_and_no_manual_repair_button_or_embedded_key(self):
         from PyQt6.QtWidgets import QPushButton
         w=Window();w.timer.stop();w.task=Mock()
-        self.assertIn('帮助与自动恢复',[w.nav.item(i).text() for i in range(w.nav.count())])
+        self.assertIn('使用帮助',[w.nav.item(i).text() for i in range(w.nav.count())])
         self.assertIn('API Key',w.help_document.toPlainText())
         self.assertEqual(w.key.text(),'')
         self.assertFalse(any(b.text()=='修复当前账号' for b in w.findChildren(QPushButton)))
@@ -161,7 +211,7 @@ class UITests(unittest.TestCase):
         self.assertIn('课程清单:fixture',first)
         w.done('课程清单:fixture',{'account_id':'fixture','result':{'account_id':'fixture','courses':[{'name':'Course A'}]}})
         self.assertEqual(w.exam_course.currentText(),'Course A')
-        w.done('浏览器状态:fixture',{'running':True});self.assertEqual(w.account_toggle.text(),'关闭账号')
+        w.done('浏览器状态:fixture',{'running':True});self.assertEqual(w.account_toggle.text(),'停止并退出账号')
         jobs.clear();w.toggle_account();self.assertEqual(jobs[-1][0],'关闭账号:fixture')
         texts=[b.text() for b in w.findChildren(QPushButton)]
         self.assertNotIn('读取考试课程',texts);self.assertNotIn('添加并启动账号',texts)

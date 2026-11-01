@@ -78,8 +78,20 @@ def _save():
             os.replace(temporary,target)
 
 
-def learning_batch_status() -> dict:
+def learning_batch_status(media_only: bool = False) -> dict:
     """Cached compact state only; no page reads, HTTP calls or model API."""
+    if media_only:
+        from . import course_direct as direct
+        watch=direct._state.get('video_watch',{});current=_state.get('current') or {}
+        query={k.lower():v for k,v in parse_qs(urlparse(watch.get('page_url','')).query).items()}
+        if (not watch.get('sample') or query.get('chapterid')!=[str(current.get('chapter_id'))]
+                or direct._state.get('account_id')!=current.get('account_id')):return {'current':None}
+        observed=watch.get('sample_observed_monotonic',0)
+        return {'account_id':current['account_id'],'current':{
+            'chapter_id':current['chapter_id'],'course_id':current.get('course_id'),
+            'sample':copy.deepcopy(watch['sample']),'sample_observed_monotonic':observed,
+            'sample_age_seconds':max(0,time.monotonic()-observed),
+            'sample_source':watch.get('sample_source'),'media_progress':copy.deepcopy(watch.get('media_progress',{}))}}
     with _lock:result=copy.deepcopy(_snapshot)
     result['dispatcher_alive']=bool(_thread and _thread.is_alive())
     result['dispatcher_state']=_state.get('status')
@@ -107,6 +119,9 @@ def learning_batch_status() -> dict:
             observed=watch.get('sample_observed_monotonic')
             current['sample_observed_monotonic']=observed
             current['sample_age_seconds']=round(max(0,time.monotonic()-observed),1) if observed is not None else None
+            current['sample_source']=watch.get('sample_source','initial_read')
+            current['sync_events']=watch.get('event_received_count',0)
+            current['fallback_reads']=watch.get('fallback_read_count',0)
         current['sample_is_cached']=True
     from .hourly_reports import reporter
     result['recent_grades']=[]

@@ -19,8 +19,12 @@ def main():
         import ctypes
         window=ctypes.windll.kernel32.GetConsoleWindow()
         if window:ctypes.windll.user32.ShowWindow(window,0)
-    from app import main as desktop_main
-    desktop_main()
+    if '--paired' in arguments or '--preview-only' in arguments or '--smoke-test' in arguments:
+        from app import main as desktop_main
+        desktop_main()
+    else:
+        from chaoxing_learning_mcp.desktop_host import main as host_main
+        host_main()
 
 
 if __name__=='__main__':main()

@@ -1,4 +1,4 @@
 """StudyFlow: Chaoxing course tasks and exams."""
 
-__version__ = "1.9.8"
+__version__ = "1.10.0"
 

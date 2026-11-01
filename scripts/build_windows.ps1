@@ -3,6 +3,7 @@ $ErrorActionPreference='Stop'
 $project=Split-Path -Parent $PSScriptRoot
 $resolvedOutput=[System.IO.Path]::GetFullPath((Join-Path $project $Output))
 & $Python -m PyInstaller --noconfirm --clean --onedir --console --name StudyFlow `
+  --icon (Join-Path $project 'src/chaoxing_learning_mcp/assets/studyflow.ico') `
   --paths (Join-Path $project 'desktop') --paths (Join-Path $project 'src') `
   --collect-all playwright --collect-submodules chaoxing_learning_mcp --collect-submodules mcp `
   --add-data ((Join-Path $project 'src/chaoxing_learning_mcp/assets')+';chaoxing_learning_mcp/assets') `

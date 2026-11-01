@@ -14,6 +14,7 @@ work/
 *.jpg
 *.zip
 !docs/images/*.png
+!src/chaoxing_learning_mcp/assets/studyflow.png
 
 dist/
 build/

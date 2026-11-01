@@ -8,7 +8,7 @@ def fixture_state(monkeypatch):
     monkeypatch.setattr(d,'_state',state)
     return state,page,frame
 
-def test_reads_real_media_every_two_seconds_without_push_or_mutation(monkeypatch):
+def test_silent_event_channel_has_only_low_frequency_read_only_fallback(monkeypatch):
     state,page,frame=fixture_state(monkeypatch)
     sample={'current_time':42.5,'duration':100,'playback_rate':1.25,'decoded_frames':200,
             'paused':False,'ended':False,'muted':True}
@@ -17,13 +17,23 @@ def test_reads_real_media_every_two_seconds_without_push_or_mutation(monkeypatch
     d._read_live_sample();d._read_live_sample()
     read.assert_called_once_with(frame)
     assert state['video_watch']['sample']==sample
-    assert state['video_watch']['sample_source']=='direct_media_read'
+    assert state['video_watch']['sample_source']=='event_silence_check'
     assert state['video_watch']['due']==500
     page.expose_binding.assert_not_called();frame.evaluate.assert_not_called()
     monkeypatch.setattr(d.time,'monotonic',lambda:103)
+    d._read_live_sample();assert read.call_count==1
+    monkeypatch.setattr(d.time,'monotonic',lambda:116)
     read.return_value={**sample,'current_time':46}
     d._read_live_sample()
     assert read.call_count==2 and state['video_watch']['sample']['current_time']==46
+
+def test_healthy_player_events_never_trigger_media_poll(monkeypatch):
+    state,page,frame=fixture_state(monkeypatch)
+    state['video_watch']['event_received_at']=99
+    read=Mock();monkeypatch.setattr(d,'_watch_sample',read)
+    monkeypatch.setattr(d.time,'monotonic',lambda:100)
+    for _ in range(20):d._read_live_sample()
+    read.assert_not_called()
 
 def test_changed_page_retains_previous_sample_and_time(monkeypatch):
     state,page,frame=fixture_state(monkeypatch);page.url='https://example.com/other'

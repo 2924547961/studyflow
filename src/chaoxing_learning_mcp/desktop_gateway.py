@@ -18,10 +18,12 @@ _preferences = globals().get('_preferences', {})
 _client_state = globals().get('_client_state', {})
 _rpc_faults=globals().get('_rpc_faults',[])
 _client_seen=globals().get('_client_seen',0.0)
+_desktop_launch=globals().get('_desktop_launch')
+_show_requested=globals().get('_show_requested',0)
 ALLOWED = frozenset({'parallel_learning_status', 'parallel_account_tool',
     'setup_learning_accounts', 'configure_smtp_sender', 'smtp_notification_status',
     'desktop_accounts', 'desktop_account_tool', 'start_parallel_learning_batches', 'desktop_report_state',
-    'import_accounts','login_accounts','configure_desktop_preferences','start_account_workspace'})
+    'import_accounts','login_accounts','configure_desktop_preferences','start_account_workspace','desktop_application'})
 ROUTED = frozenset({'runtime_health','defer_current_learning_task','recover_current_task','recover_chapter_submission_readback','browser_status','inspect_current_task','observe_chapter_quiz',
     'read_owned_exam_observation',
     'refresh_owned_exam_adapter',
@@ -65,6 +67,7 @@ def desktop_accounts():
     result['accounts'] = list(rows.values())
     result['account_count'] = len(rows)
     result['review_evidence']=dict(_preferences.get('review_evidence',{}))
+    result['show_requested']=_show_requested
     return result
 
 
@@ -101,6 +104,9 @@ def desktop_console_status(check_connection: bool = False):
               'diagnostic_interface':{'transport':'existing_authenticated_mcp','can_wake_model':False,
                   'client_heartbeat_age':round(time.monotonic()-_client_seen,1) if _client_seen else None,
                   'recent_rpc_faults':list(_rpc_faults[-20:])}}
+    from . import application_service
+    if application_service._service is not None:
+        result['application_service']=application_service._service.snapshot()
     if check_connection and _gateway:
         import requests
         http,token = _gateway
@@ -118,7 +124,7 @@ def desktop_report_state(client_state: dict):
     """Cache bounded frontend health only; no questions, keys, cookies or model output."""
     global _client_seen
     _client_seen=time.monotonic()
-    allowed = ('auto_review','model_calls','model_tokens','busy_actions','errors','model_error','pending_reviews')
+    allowed = ('auto_review','model_calls','model_tokens','busy_actions','errors','model_error','pending_reviews','media_updates','media_delay_ms')
     with _lock:
         _client_state.clear()
         _client_state.update({k:client_state[k] for k in allowed if k in client_state})
@@ -191,10 +197,11 @@ def desktop_account_tool(account_id: str, tool_name: str, arguments: dict | None
 
 def start_desktop_console(app_path: str, python_path: str = '', port: int = 8796):
     """Open the explicitly requested local GUI, sharing this process's accounts."""
-    global _gateway, _gui
+    global _gateway, _gui, _desktop_launch
     app = Path(app_path).resolve()
     if not app.is_file() or app.suffix.lower() not in ('.py', '.exe'):
         raise ValueError('A local desktop .py or .exe file is required')
+    _desktop_launch={'app_path':str(app),'python_path':python_path,'port':port}
     with _lock:
         if _gui is not None and _gui.poll() is None:
             return {'opened':False,'already_running':True,'pid':_gui.pid,'backend_pid':os.getpid()}
@@ -235,7 +242,7 @@ def start_desktop_console(app_path: str, python_path: str = '', port: int = 8796
             stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
             creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
         # Pairing secret travels only over an inherited pipe, never argv or disk.
-        _gui.stdin.write((json.dumps({'port':http.server_address[1],'token':token,'preferences':_preferences})+'\n').encode())
+        _gui.stdin.write((json.dumps({'port':http.server_address[1],'token':token,'preferences':public_preferences()})+'\n').encode())
         _gui.stdin.close()
         return {'opened':True,'pid':_gui.pid,'backend_pid':os.getpid(),
                 'port':http.server_address[1],'new_browser_started':False}
@@ -254,18 +261,30 @@ def attach_local_console(port:int=0):
             _gateway=(http,token)
             threading.Thread(target=http.serve_forever,daemon=True,name='desktop-gateway').start()
         http,token=_gateway
-        return {'port':http.server_address[1],'token':token,'preferences':_preferences}
+        return {'port':http.server_address[1],'token':token,'preferences':public_preferences()}
+
+
+def public_preferences():
+    """The UI receives metadata, never stored model credentials."""
+    from .application_core import audit_data
+    return audit_data(_preferences)
 
 
 
 def _handle_post(self):
+    if self.path=='/show':
+        return _show_desktop(self)
     """Hot-replaceable authenticated RPC; preserve typed faults without secrets."""
-    from .studyflow import server
     self.connection.settimeout(10)
     token=_gateway[1]
-    if (self.path!='/rpc' or self.headers.get('Origin') or
+    if (self.path not in ('/rpc','/media-stream') or self.headers.get('Origin') or
         not hmac.compare_digest(self.headers.get('Authorization',''),'Bearer '+token)):
         self.send_error(403);return
+    if self.path=='/media-stream':
+        if self.headers.get('Content-Length','0')!='0':self.send_error(400);return
+        from .media_stream import serve
+        return serve(self)
+    from .studyflow import server
     name='';args={}
     try:
         size=int(self.headers.get('Content-Length','0'))
@@ -281,7 +300,9 @@ def _handle_post(self):
         code=getattr(root,'code',None)
         from .parallel_runner import _WORKER_CODES
         if code is None and str(root) in _WORKER_CODES:code=str(root)
-        if code not in _WORKER_CODES:code='RPC_OPERATION_FAILED_OR_UNKNOWN'
+        from .application_core import ActionError
+        if isinstance(root,ActionError):code=str(root)
+        elif code not in _WORKER_CODES:code='RPC_OPERATION_FAILED_OR_UNKNOWN'
         record={'at':time.time(),'tool':name,'operation':args.get('tool_name'),
                 'account':args.get('account_id'),'error_type':type(root).__name__,'error_code':code}
         with _lock:_rpc_faults.append(record);del _rpc_faults[:-100]
@@ -294,11 +315,29 @@ def _handle_post(self):
     except OSError:pass
 
 
+def _show_desktop(handler):
+    """A launcher may show the local UI; this endpoint exposes no accounts or token."""
+    global _show_requested
+    if (handler.headers.get('Origin') or handler.headers.get('X-StudyFlow-Launch')!='1'
+            or handler.headers.get('Host') not in (f'127.0.0.1:{handler.server.server_address[1]}',f'localhost:{handler.server.server_address[1]}')
+            or handler.headers.get('Content-Length','0')!='0' or not _desktop_launch):
+        handler.send_error(403);return
+    _show_requested+=1
+    start_desktop_console(**_desktop_launch)
+    raw=json.dumps({'application':'StudyFlow','shown':True,'backend_pid':os.getpid()}).encode()
+    handler.send_response(200);handler.send_header('Content-Type','application/json')
+    handler.send_header('Content-Length',str(len(raw)));handler.end_headers();handler.wfile.write(raw)
+
+
 def install_handler():
     if _gateway:_gateway[0].RequestHandlerClass.do_POST=_handle_post
     from .studyflow import server
     if 'desktop_account_tool' in {t.name for t in server._tool_manager.list_tools()}:
         server.remove_tool('desktop_account_tool')
     server.add_tool(desktop_account_tool)
+    from .application_service import desktop_application
+    if 'desktop_application' in {t.name for t in server._tool_manager.list_tools()}:
+        server.remove_tool('desktop_application')
+    server.add_tool(desktop_application)
 
 if _gateway:install_handler()

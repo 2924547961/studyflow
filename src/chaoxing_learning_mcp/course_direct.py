@@ -2058,24 +2058,26 @@ def _watch_sample(frame):
 
 
 def _read_live_sample():
-    """Two-second local read on the existing Playwright thread; no page push or model."""
+    """Event silence watchdog only; normal time updates arrive from the player."""
     w=_state.get('video_watch',{});now=time.monotonic()
-    if not w.get('enabled') or now<w.get('live_read_due',0):return
-    w['live_read_due']=now+2
+    if not w.get('enabled'):return
     frame=w.get('frame');page=_state.get('page')
     if frame is None or frame.is_detached() or page is None or page.is_closed() or page.url!=w.get('page_url'):return
     try:
-        sample=_watch_sample(frame)
-        w.setdefault('guard_sample',dict(w.get('sample',{})))
-        w.update(sample=sample,sample_observed_monotonic=time.monotonic(),sample_source='direct_media_read')
-        w.pop('live_read_error',None)
         if time.monotonic()>=w.get('caption_read_due',0):
             w['caption_read_due']=time.monotonic()+30
             try:
                 captions=read_owned_video_captions.__wrapped__()
                 if captions.get('available'):w['caption_read_due']=float('inf')
             except Exception:pass
-
+        last_event=w.get('event_received_at',w.get('event_attached_at',0))
+        if now-last_event<15 or now<w.get('live_read_due',0):return
+        w['live_read_due']=now+15
+        sample=_watch_sample(frame)
+        w.setdefault('guard_sample',dict(w.get('sample',{})))
+        w.update(sample=sample,sample_observed_monotonic=time.monotonic(),sample_source='event_silence_check',
+            fallback_read_count=w.get('fallback_read_count',0)+1)
+        w.pop('live_read_error',None)
         if (sample.get('paused') or sample.get('ended')) and w.get('status') not in ('question_requires_review','awaiting_verification'):
             w['due']=min(w.get('due',now),now)
     except Exception as exc:
@@ -2256,7 +2258,9 @@ def monitor_owned_video(action: str = 'start') -> dict[str, Any]:
             # native player events, focus, playback or platform reporting.
             if _state.get('sample_binding_page') is page:
                 frame.evaluate("if(window.__studyflowLiveSample)window.__studyflowLiveSample=()=>Promise.resolve()")
-            _state['video_watch']['live_read_due']=0
+            from .media_events import attach
+            attach(_state,page,frame)
+            _state['video_watch']['live_read_due']=time.monotonic()+15
             _read_live_sample()
     _run(change)
     if action == 'start' and not _state.get('watch_service_running'):
@@ -2684,6 +2688,15 @@ def refresh_desktop_implementation():
     from . import desktop_gateway, parallel_runner
     with _operation_lock:
         importlib.reload(desktop_gateway)
+        from . import application_service
+        service=application_service._service
+        service_updated=False
+        if service is not None:
+            with service.lock:
+                if not service.active:
+                    importlib.reload(application_service)
+                    service.__class__=application_service.ApplicationService
+                    service_updated=True
         desktop_gateway.install_handler()
         if not parallel_runner._active and not parallel_runner._sessions and not (parallel_runner._loop and parallel_runner._loop.is_running()):
             importlib.reload(parallel_runner)
@@ -2695,7 +2708,7 @@ def refresh_desktop_implementation():
                 if tool.__name__ in registered:server.remove_tool(tool.__name__)
                 server.add_tool(tool)
         parallel_runner.REVIEW_TOOLS.update(desktop_gateway.ROUTED)
-    return {'updated':True, 'accounts_preserved':True, 'browser_restarted':False}
+    return {'updated':True, 'accounts_preserved':True, 'browser_restarted':False,'application_service_updated':service_updated}
 
 
 def refresh_owned_exam_adapter():

@@ -5,21 +5,27 @@ import time
 import base64
 from concurrent.futures import ThreadPoolExecutor
 from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal
-from PyQt6.QtGui import QFontDatabase, QFont,QPixmap
+from PyQt6.QtGui import QFontDatabase, QFont,QPixmap,QIcon
 from PyQt6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,
     QLabel,QPushButton,QTableWidget,QTableWidgetItem,QHeaderView,QTabWidget,QFormLayout,
     QLineEdit,QComboBox,QPlainTextEdit,QDialog,QDialogButtonBox,QMessageBox,QCheckBox,QListWidgetItem,QInputDialog,QScrollArea,QSystemTrayIcon,QMenu,QStyle)
-from core import StudyFlowAdapter,ModelReviewer,ReviewCoordinator,ExamCoordinator,course_queue,AttachedReview,ActionError
+from core import StudyFlowAdapter,RecoveryCoordinator,course_queue,ActionError
+from service_client import ApplicationClient,ModelSelection
 
 from theme import STYLE
 from ui import build_ui
-from core import discover_models,audit_data
+from core import audit_data
 from presentation import PRESETS,readable_event,import_profile,export_profile,media_caption
 
 STATUS={'running':'运行中','starting':'启动中','awaiting_review':'正在处理题目',
         'awaiting_verification':'等待本人验证','blocked':'需要检查','completed':'已完成','stopped':'已暂停',
         'ready':'已登录 · 待安排','login_required':'需要登录'}
 ERRORS={'MODEL_OUTPUT_LIMIT_REACHED':'模型在给出完整答案前达到输出上限；未提交，请增加输出预算后重新审阅。','MODEL_NOT_CONFIGURED':'先在“模型服务”选择并应用一个模型。',
+    'MODEL_PROVIDER_REQUIRED':'请先手动选择服务商。',
+    'MODEL_NAME_REQUIRED':'请选择或填写模型名称，再点击应用。',
+    'MODEL_KEY_REQUIRED_FOR_ENDPOINT':'请为这个服务地址填写 API Key；不同地址不自动复用密钥。',
+    'MODEL_SELECTION_CHANGED':'所选模型已更新，请使用当前已应用配置重新开始此任务。',
+    'ACCOUNT_TASK_IN_PROGRESS':'这个账号已有后台任务，进度会继续同步。',
     'EXAM_ACTIVE_KEEP_BROWSER':'当前账号还有原考试待处理；请打开原考试浏览器，读取平台结果后再切换课程。',
     'EXAM_PAGE_NOT_OPEN':'尚未检测到该账号的试卷标签页；当前读取未发生答题提交。进入试卷后重新读取。',
     'EXAM_PAGE_AMBIGUOUS':'该账号存在多个试卷标签页，需核对目标试卷；未执行答题提交。',
@@ -35,10 +41,10 @@ ERRORS={'MODEL_OUTPUT_LIMIT_REACHED':'模型在给出完整答案前达到输出
     'EXAM_REVIEW_OR_READBACK_REQUIRED':'有答案差异或缺少审阅，已保留页面，请查看整卷。',
     'EXAM_RESULT_UNKNOWN_NO_REPLAY':'保存结果待确认，已停止重复操作。',
     'SELECT_AT_LEAST_ONE_COURSE':'至少勾选一门课程。',
-    'ACCOUNT_BROWSER_NOT_RUNNING':'该账号浏览器未运行，请点击“启动账号”。',
+    'ACCOUNT_BROWSER_NOT_RUNNING':'该账号浏览器未运行，请点击“连接账号”。',
     'BROWSER_AUTHENTICATION_EXPIRED':'浏览器登录已失效，请在该账号浏览器重新登录；课程完成记录保留。',
     'BROWSER_RECOVERY_STATE_INVALID':'浏览器恢复遇到课程索引越界（IndexError）；浏览器未启动，需加载修复后再启动。',
-    'BROWSER_CLOSED':'该账号浏览器已关闭，请点击“启动账号”恢复；有待确认提交时保留现场。',
+    'BROWSER_CLOSED':'该账号浏览器已关闭，请点击“连接账号”恢复；有待确认提交时保留现场。',
     'BROWSER_ACTION_TIMEOUT':'浏览器操作超时，结果待核验；先刷新状态，不重复提交或重建浏览器。',
     'CLOSED_BROWSER_REQUIRES_OUTCOME_REVIEW':'浏览器已关闭且有考试或待确认提交，已保留记录；先核验原结果再恢复。',
     'EXISTING_QUEUE_CONFLICT':'该账号已有不同课程队列；所选课程尚未启动。继续原任务请点击“恢复当前队列”。',
@@ -53,6 +59,7 @@ class Events(QObject):
     failed=pyqtSignal(str,str)
     progress=pyqtSignal(object)
     audit=pyqtSignal(object)
+    media=pyqtSignal(object)
 
 def record_desktop_fault(exc_type,tb,path=None):
     """Persist exception location only; never exception text, locals or credentials."""
@@ -73,23 +80,26 @@ def record_desktop_fault(exc_type,tb,path=None):
 class Window(QMainWindow):
     def __init__(self,adapter=None):
         super().__init__();self.adapter=adapter;self.closed=False
-        self.coordinator=ReviewCoordinator(adapter) if adapter else None
-        self.exams=ExamCoordinator(adapter) if adapter else None
+        self.application=ApplicationClient(adapter) if adapter else None
+        self.coordinator=self.application;self.exams=self.application
+        self.backend_jobs={};self.backend_seen={};self.backend_cursor=0;self.backend_ready=False;self.backend_snapshot={}
         self.model=None;self.rows={};self.busy=set();self.auto_attempts=set()
         self.browser_live={};self.browser_due={};self.course_due={};self.exam_intents={};self.exam_run_ids={};self.exam_requested_course={}
         self.pool=ThreadPoolExecutor(max_workers=8);self.events=Events()
         self.events.done.connect(self.done);self.events.failed.connect(self.failed)
         self.events.progress.connect(self.exam_progress)
         self.setWindowTitle('StudyFlow · 学程桌面');self.resize(1380,900);self.setMinimumSize(1050,720)
+        from importlib.resources import files
+        self.setWindowIcon(QIcon(str(files('chaoxing_learning_mcp').joinpath('assets/studyflow.ico'))))
         self.profiles={};self.course_lists={};self.queue_drafts={};self.prepared_exams={}
         self.finishing=set();self.grade_seen=set();self.replay_seen=set();self.replay_policy_due={}
         self.last_errors={}
         self.audit_rows=[];self.last_states={};self.sample_due={};self.mail_due={};self.recoveries=set();self.live_samples={}
-        self.account_modes={};self.browser_views={};self.active_provider='DeepSeek';self.journal_seen=set();self.completion_seen=set();self.mail_seen=set()
+        self.account_modes={};self.browser_views={};self.active_provider='';self.journal_seen=set();self.completion_seen=set();self.mail_seen=set()
         build_ui(self)
         self.exit_requested=False;self.tray=None
         if adapter and QSystemTrayIcon.isSystemTrayAvailable():
-            self.tray=QSystemTrayIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon),self)
+            self.tray=QSystemTrayIcon(self.windowIcon(),self)
             self.tray.setToolTip('StudyFlow · 后台学习中')
             menu=QMenu(self)
             menu.addAction('打开学习面板',self.show_panel)
@@ -98,9 +108,33 @@ class Window(QMainWindow):
             self.tray.activated.connect(lambda reason:self.show_panel() if reason==QSystemTrayIcon.ActivationReason.DoubleClick else None)
             self.tray.show()
         self.events.audit.connect(self.append_audit)
+        self.events.media.connect(self.update_media)
+        if self.application:self.application.start_media_stream(self.events.media.emit)
         if adapter:adapter.on_event=self.events.audit.emit
         self.timer=QTimer(self);self.timer.timeout.connect(self.poll);self.timer.start(2000)
+        self.auto.toggled.connect(self.configure_automation)
+        self.review_mode.currentIndexChanged.connect(self.configure_automation)
         QTimer.singleShot(0,self.poll)
+    def update_media(self,data):
+        if self.closed:return
+        aid=data.get('account_id');row=self.rows.get(aid);current=data.get('current') or {}
+        if not row or not current.get('sample'):return
+        existing=row.get('current') or {}
+        if (str(existing.get('chapter_id'))!=str(current.get('chapter_id'))
+                or existing.get('course_id')!=current.get('course_id')):return
+        observed=current.get('sample_observed_monotonic',0)
+        if observed<self.live_samples.get(aid,{}).get('observed_monotonic',0):return
+        self.live_samples[aid]={**current,'observed_monotonic':observed}
+        self.media_updates=getattr(self,'media_updates',0)+1
+        self.media_delay_ms=round(max(0,time.monotonic()-observed)*1000)
+        existing.update(current);existing['sample_age_seconds']=max(0,time.monotonic()-observed)
+        for index in range(self.table.rowCount()):
+            item=self.table.item(index,0)
+            if item and item.text()==aid:
+                self.table.setItem(index,3,QTableWidgetItem(media_caption(current['sample'],current.get('media_progress'))))
+                self.table.setItem(index,4,QTableWidgetItem('网页事件同步' if current.get('sample_source')=='player_event' else '连接检查'))
+                break
+        if self.selected()==aid:self.dashboard.update_media(existing,smooth=True)
     def task(self,key,fn):
         if self.closed or key in self.busy:return
         self.busy.add(key)
@@ -112,6 +146,7 @@ class Window(QMainWindow):
         if self.closed:return
         if self.adapter:
             self.task('status',self.adapter.snapshot)
+            if self.application:self.task('后台服务',lambda:self.application.call('status',after=self.backend_cursor))
             for aid,row in tuple(self.rows.items()):
                 now=time.monotonic()
                 if row.get('status')!='login_required' and aid not in self.course_lists and now>=self.course_due.get(aid,0):
@@ -124,6 +159,7 @@ class Window(QMainWindow):
                     self.task('实时进度:'+aid,lambda aid=aid:self.adapter.route(aid,'learning_batch_status'))
             health={'auto_review':self.auto.isChecked(),'model_calls':self.model.calls if self.model else 0,
                     'model_tokens':self.model.tokens if self.model else 0,'busy_actions':list(self.busy),
+                    'media_updates':getattr(self,'media_updates',0),'media_delay_ms':getattr(self,'media_delay_ms',None),
             'errors':dict(self.last_errors),'pending_reviews':audit_data(self.coordinator.pending if self.coordinator else {}),'model_error':getattr(self.model,'last_error',{}) if self.model else {}}
             self.task('clientstatus',lambda:self.adapter.call('desktop_report_state',{'client_state':health}))
             for aid in tuple(self.finishing):self.task('交卷状态:'+aid,lambda aid=aid:self.adapter.route(aid,'owned_exam_finish_status'))
@@ -166,7 +202,7 @@ class Window(QMainWindow):
     def recover_account(self,aid):
         return self.auto_repair(aid)
     def recovery_busy(self,aid):
-        return any(prefix+aid in self.busy for prefix in ('自动故障处理:','只读恢复:','接续只读恢复:','提交回读恢复:','审阅 ',
+        return aid in self.backend_jobs or any(prefix+aid in self.busy for prefix in ('自动故障处理:','只读恢复:','接续只读恢复:','提交回读恢复:','审阅 ',
             '启动账号:','关闭账号:','打开交互浏览器:','返回后台:','启动队列:')) or self.exam_operation_active(aid)
     def schedule_recovery(self,aid,scene):
         if not self.adapter or self.recovery_busy(aid) or scene in self.recoveries:return
@@ -175,20 +211,17 @@ class Window(QMainWindow):
         self.task('自动故障处理:'+aid,lambda aid=aid:self.auto_repair(aid))
     def apply_preferences(self,preferences):
         self.queue_drafts=preferences.get('course_queues',{})
-        self.profiles.update(preferences.get('profiles',{}))
+        self.profiles.update({name:{k:v for k,v in value.items() if k!='key'} for name,value in preferences.get('profiles',{}).items()})
         for name in self.profiles:
             if self.provider.findText(name)<0:self.provider.addItem(name)
-        config=preferences.get('model_config')
-        if config:
-            try:
-                self.model=ModelReviewer(**config)
-                name=preferences.get('active_profile','DeepSeek');self.active_provider=name
-                self.profiles[name]={**config,'models':self.profiles.get(name,{}).get('models',[config['model']])}
-                if self.provider.findText(name)<0:self.provider.addItem(name)
-                self.provider.setCurrentText(name);self.provider_changed(name)
-                self.model_status.setText('已启用 '+config['model']+' · 仅题目审阅调用模型')
-            except Exception as exc:self.failed('模型设置',str(exc))
+        self.auto.blockSignals(True)
         self.auto.setChecked(preferences.get('auto_review',False))
+        self.auto.blockSignals(False)
+        self.configure_automation()
+    def configure_automation(self,*_):
+        if self.application:
+            enabled=self.auto.isChecked();cache_only=self.review_mode.currentIndex()==1
+            self.task('自动处理设置',lambda:self.application.call('auto',enabled=enabled,cache_only=cache_only))
     def selected(self):
         return self.account_picker.currentData()
     def done(self,key,data):
@@ -204,11 +237,43 @@ class Window(QMainWindow):
             self.append_audit({'account':key.removeprefix('审阅 '),'event':'平台弹题判错','result':data})
             return
         if key=='clientstatus':return
-        if key=='status':
+        if key=='后台服务':
+            self.backend_snapshot=data
+            self.backend_cursor=data.get('event_cursor',self.backend_cursor)
+            self.backend_jobs={j['account_id']:j for j in data.get('jobs',[]) if j['state']=='running'}
+            self.application.pending=data.get('pending_reviews',{})
+            model=data.get('model',{});first=not self.backend_ready;self.backend_ready=True
+            if model.get('configured'):
+                self.model=ModelSelection(model);self.active_provider=model['provider']
+                self.profiles.update(model.get('profiles',{}))
+                if first and not self.provider.currentText():
+                    if self.provider.findText(self.active_provider)<0:self.provider.addItem(self.active_provider)
+                    self.provider.setCurrentText(self.active_provider);self.provider_changed(self.active_provider)
+            for event in data.get('events',[]):self.append_audit(event)
+            for job in data.get('jobs',[]):
+                if job.get('progress'):self.exam_progress(job['progress'])
+                if self.backend_seen.get(job['id'])==job['state']:continue
+                self.backend_seen[job['id']]=job['state']
+                if job['state']=='failed':self.append_audit({'account':job['account_id'],'event':'后台任务未完成','error':job['error']})
+                elif job['state']=='completed':self.append_audit({'account':job['account_id'],'event':'后台任务完成','result':job['result']})
+            self.update_actions()
+            self.model_active.setText('当前已应用  /  '+self.active_provider+' · '+self.model.model if self.model else '当前已应用  /  尚未选择模型')
+            self.dashboard.update_snapshot(self.rows,self.selected(),data)
+        elif key=='应用模型配置':
+            self.model=ModelSelection(data);self.active_provider=data['provider'];self.profiles.update(data['profiles'])
+            self.key.clear();self.model_status.setText('当前已应用：'+self.active_provider+' / '+self.model.model+' · 后台生效，编辑草稿不改变当前服务')
+            self.model_active.setText('当前已应用  /  '+self.active_provider+' · '+self.model.model)
+        elif key=='自动处理设置':
+            if data.get('auto_review')!=self.auto.isChecked() or data.get('cache_only')!=(self.review_mode.currentIndex()==1):
+                self.configure_automation()
+        elif key=='status':
+            show_requested=data.get('show_requested',0)
+            if show_requested>getattr(self,'last_show_request',0):
+                self.last_show_request=show_requested;self.show_panel()
             evidence_map=data.get('review_evidence',{})
             accounts=data.get('accounts',[]);selected=self.selected();self.rows={a['account_id']:a for a in accounts}
             self.account_picker.blockSignals(True);self.account_picker.clear()
-            for a in accounts:self.account_picker.addItem(a.get('username_hint') or a['account_id'],a['account_id'])
+            for a in accounts:self.account_picker.addItem(a['account_id']+' · '+str(a.get('username_hint') or '独立账号'),a['account_id'])
             index=self.account_picker.findData(selected)
             if getattr(self,'pending_select',None):
                 index=self.account_picker.findData(self.pending_select)
@@ -229,11 +294,13 @@ class Window(QMainWindow):
                 if (live.get('chapter_id')==current.get('chapter_id') and live.get('sample') and
                     live.get('observed_monotonic',0)>current.get('sample_observed_monotonic',0)):
                     sample=live['sample'];age=max(0,now-live['observed_monotonic'])
+                    current.update({k:live[k] for k in ('sample','sample_source','media_progress') if k in live})
+                    current.update(sample_observed_monotonic=live['observed_monotonic'],sample_age_seconds=age)
                 state=(a.get('status'),current.get('chapter_id'),a.get('attention'),a.get('error_code'))
                 if self.last_states.get(aid)!=state:
                     self.last_states[aid]=state
                     self.append_audit({'account':aid,'event':'状态变化','status':a.get('status'),'chapter':current.get('chapter'),'attention':a.get('attention'),'error':a.get('error_code')})
-                # The browser watcher already samples every two seconds. A stale
+                # The browser supplies media events. A stale
                 # UI snapshot must not enqueue another player read after navigation.
                 if self.adapter and now>=self.mail_due.get(aid,0):
                     self.mail_due[aid]=now+60
@@ -246,13 +313,18 @@ class Window(QMainWindow):
                     or a.get('attention')=='Playback needs inspection')):
                     self.schedule_recovery(aid,recovery)
                 media=media_caption(sample,current.get('media_progress'))
+                from dashboard import state_label
+                completed=state_label(a)=='课程已完成'
                 recovering=any(prefix+aid in self.busy for prefix in ('只读恢复:','接续只读恢复:','提交回读恢复:','自动故障处理:'))
-                values=[a['account_id'],('正在自动恢复' if recovering else '正在完成章节测验' if a.get('attention')=='chapter_quiz' else '正在处理视频弹题' if a.get('attention')=='video_question' else STATUS.get(a['status'],a['status'])),current.get('chapter') or '尚未安排任务',media,
-                        ('播放已结束 · 待平台确认' if sample.get('ended') else (f'{age:.0f}秒前'+(' · 更新延迟' if age>15 else ' · 实时')) if isinstance(age,(int,float)) else '等待采样'),a.get('attention') or '本地脚本处理中']
+                hint=('查看完成明细' if completed else '请在学习网页完成验证' if a.get('user_action_required') else
+                    '正在核验答案' if a.get('status')=='awaiting_review' else '按课程顺序继续' if a.get('status')=='running' else
+                    '正在检查并恢复' if recovering else '选择课程后开始学习')
+                values=[a['account_id'],('课程已完成' if completed else '正在自动恢复' if recovering else '正在完成章节测验' if a.get('attention')=='chapter_quiz' else '正在处理视频弹题' if a.get('attention')=='video_question' else STATUS.get(a['status'],a['status'])),current.get('chapter') or ('已选课程全部完成' if completed else '尚未开始课程'),media if sample else '—',
+                        ('播放已结束 · 待平台确认' if sample.get('ended') else (f'{age:.0f}秒前'+(' · 更新延迟' if age>15 else ' · 实时')) if isinstance(age,(int,float)) else '—'),hint]
                 for j,v in enumerate(values):self.table.setItem(i,j,QTableWidgetItem(str(v)))
                 if a['account_id']==selected:self.table.selectRow(i)
                 if a.get('status')=='running':self.auto_attempts={x for x in self.auto_attempts if x[0]!=a['account_id']}
-                if self.auto.isChecked() and (self.model or self.review_mode.currentIndex()==1) and a.get('status')=='awaiting_review' and a.get('attention') in ('chapter_quiz','video_question'):
+                if not self.application and self.auto.isChecked() and (self.model or self.review_mode.currentIndex()==1) and a.get('status')=='awaiting_review' and a.get('attention') in ('chapter_quiz','video_question'):
                     supplied=evidence_map.get(a['account_id'],{})
                     extra=supplied.get('text','') if supplied.get('chapter_id')==current.get('chapter_id') else ''
                     attached=supplied.get('attached_review') if supplied.get('chapter_id')==current.get('chapter_id') else None
@@ -261,9 +333,10 @@ class Window(QMainWindow):
                         self.auto_attempts.add(identity);self.start_review(a['account_id'],a['attention'],extra,attached)
             self.table.blockSignals(False)
             self.banner.setText(f"已连接 · {len(accounts)} 个独立账号 · 更新于 {time.strftime('%H:%M:%S')} · 页面由事件 / 预计结束时间调度")
-            self.summary.setText(f"{len(accounts)} 个账号    /    {sum(a.get('status')=='running' for a in accounts)} 个运行中    /    {sum(a.get('user_action_required',False) for a in accounts)} 个需本人处理")
+            self.summary.setText(f"账号 {len(accounts)}   ·   运行 {sum(a.get('status')=='running' for a in accounts)}   ·   本人验证 {sum(a.get('user_action_required',False) for a in accounts)}")
             if selected != self.selected():self.render_courses();self.details()
             self.update_actions()
+            self.dashboard.update_snapshot(self.rows,self.selected(),self.backend_snapshot)
         elif key.startswith('提交回读恢复:'):
             aid=key.split(':',1)[1]
             if data.get('recovered'):
@@ -313,9 +386,8 @@ class Window(QMainWindow):
                     self.replay_seen.add(identity)
                     self.append_audit({'account':aid,'event':'补播处理','chapter':attempt.get('chapter') or attempt.get('chapter_id'),'replay_status':attempt.get('status')})
 
-            if current.get('sample'):
-                self.live_samples[aid]={'chapter_id':current.get('chapter_id'),'sample':current['sample'],
-                    'observed_monotonic':current.get('sample_observed_monotonic',0)}
+            if current.get('sample') and current.get('sample_observed_monotonic',0)>=self.live_samples.get(aid,{}).get('observed_monotonic',0):
+                self.live_samples[aid]={**current,'observed_monotonic':current.get('sample_observed_monotonic',0)}
         elif key.startswith('媒体采样 '):
             self.live_samples[key.split(' ',1)[1]]=data
             self.last_errors.pop(key,None)
@@ -339,7 +411,7 @@ class Window(QMainWindow):
         elif key.startswith('添加账号:'):
             aid=data['account_id'];self.pending_select=aid
             self.done('课程清单:'+aid,data)
-            self.nav.setCurrentRow(1);self.poll()
+            self.nav.setCurrentRow(2);self.poll()
         elif key.startswith('课程清单:'):
             aid=data['account_id'];result=data['result'];rows=result.get('results',[result])
             entry=next((x for x in rows if x.get('account_id')==aid),{})
@@ -384,7 +456,10 @@ class Window(QMainWindow):
         elif key=='模型列表':
             self.profiles[data['provider']]={**data['config'],'models':data['models']}
             if self.provider.currentText()==data['provider']:
-                self.model_name.clear();self.model_name.addItems(data['models']);self.key.clear()
+                selected=data['config'].get('model','')
+                self.model_name.clear();self.model_name.addItems(data['models']);self.model_name.setCurrentIndex(-1)
+                if selected:self.model_name.setCurrentText(selected)
+                self.key.clear()
             self.model_status.setText(f"连接通过 · {data.get('latency_ms','—')} ms · {len(data['models'])} 个可选模型；选择后点击应用")
         elif key.startswith('浏览器状态:'):
             aid=key.split(':',1)[1];self.browser_live[aid]=bool(data.get('running'))
@@ -415,7 +490,7 @@ class Window(QMainWindow):
             if data.get('ok'):
                 self.browser_live[key.split(':',1)[1]]=True;self.update_actions()
                 self.banner.setText('已返回无头模式，继续课程队列' if key.startswith('返回后台:') else '已打开当前账号浏览器，课程仍自动继续；验证或考试现场按原守卫暂停。')
-                self.account_feedback.setText(key.split(':',1)[1]+'：'+('已返回后台。' if key.startswith('返回后台:') else '浏览器已打开；课程是否运行请查看当前章节与媒体采样。'))
+                self.account_feedback.setText(key.split(':',1)[1]+'：'+('已返回后台。' if key.startswith('返回后台:') else '浏览器已打开；课程是否运行请查看当前章节与网页播放进度。'))
             else:
                 errors={'SUBMISSION_PENDING_KEEP_BROWSER':'当前提交结果待确认，已保留浏览器；请完成回读后再切换。',
                   'EXAM_ACTIVE_KEEP_BROWSER':'考试已经开始，已保留当前考试现场；请交卷并返回课程后再切换模式。',
@@ -475,51 +550,14 @@ class Window(QMainWindow):
         else:self.banner.setText(f'{key}: {error} · 详情见事件记录')
         self.update_actions()
     def auto_repair(self,aid):
-        health=self.adapter.route(aid,'runtime_health')
-        if health.get('state')=='not_started':
-            return {'message':'账号浏览器尚未启动或已结束，无需恢复；保留原队列记录。','resumed':False}
-        if health.get('unknown_submission'):
-            result=self.adapter.route(aid,'recover_chapter_submission_readback')
-            result['recovery_kind']='submission_readback'
-            if result.get('recovered'):
-                self.adapter.route(aid,'resume_learning_batch')
-                result['message']='原提交已核验评分，自动接续；未重交。'
-                result['resumed']=True
-            return result
-        if health.get('pending_review'):return {'message':'原审阅仍在处理中，保留计划并等待回执。'}
-        if health.get('browser_worker_failed'):
-            result=self.adapter.route(aid,'recover_current_task',recover_read_worker=True)
-            if not result.get('ok'):return {'message':'原线程探测待处理：'+str(result.get('error_code'))}
-            return self.recover_after_status_fault(aid)
-        task=self.adapter.route(aid,'inspect_current_task')
-        if task.get('teacher_quiz_unavailable'):
-            check=self.adapter.route(aid,'inspect_current_task')
-            if check.get('teacher_quiz_unavailable'):
-                self.adapter.route(aid,'defer_current_learning_task',issue_id='auto_teacher_unpublished',reason='两次独立只读检查确认教师未创建测验，留待补并继续其他可用任务。',evidence_url='https://mooc1.chaoxing.com/mooc-ans/work/doHomeWorkNew')
-                return {'message':'教师未发布：已自动登记待补，继续其他可用任务。'}
-        if task.get('task_state') in ('video_completed','video','video_question_review','chapter_quiz_review'):
-            return self.resume_observed_task(aid,task)
-        return {'message':'已自动检查，当前任务尚未加载或需外部处理；保留现场，其他账号继续。'}
+        if self.application:return self.application.run(aid,"recover")
+        return RecoveryCoordinator(self.adapter).auto_repair(aid)
     def recover_after_status_fault(self,aid):
-        opened=self.adapter.route(aid,'open_account_browser',show_window=False,closed_only=True)
-        if opened.get('ok') is False:return opened
-        task=self.adapter.route(aid,'inspect_current_task')
-        return self.resume_observed_task(aid,task)
+        return RecoveryCoordinator(self.adapter).recover_after_status_fault(aid)
     def resume_observed_task(self,aid,task):
-        if task.get('video_result_unknown'):
-            return {'message':'原弹题结果待核验，保留记录；不重放提交。','resumed':False}
-        kind=task.get('task_state')
-        if kind not in ('video','video_completed','video_question_review','chapter_quiz_review'):
-            return {'message':'等待任务界面就绪；保留当前页面。','resumed':False}
-        self.adapter.route(aid,'monitor_owned_video',action='stop')
-        if kind in ('video','video_question_review'):
-            # Re-arm the existing guarded watcher: it distinguishes popup,
-            # verification, ordinary pause and completed task before any play.
-            self.adapter.route(aid,'monitor_owned_video',action='start')
-        return {**self.adapter.route(aid,'resume_learning_batch'),'resumed':True,
-                'message':'原任务监听已恢复；弹题自动进入审题，已完成视频接续目录。'}
+        return RecoveryCoordinator(self.adapter).resume_observed_task(aid,task)
     def show_question_results(self):
-        self.nav.setCurrentRow(6)
+        self.nav.setCurrentRow(7)
         self.log_current.setChecked(True)
         self.log_category.setCurrentText('答题')
         self.filter_audit()
@@ -535,29 +573,45 @@ class Window(QMainWindow):
     def update_actions(self):
         active=bool(self.adapter and self.selected())
         for b in self.account_actions:b.setEnabled(active)
-        account_busy=any(k in self.busy for k in ('启动账号:'+str(self.selected()),'关闭账号:'+str(self.selected()),'打开交互浏览器:'+str(self.selected()),'返回后台:'+str(self.selected()),'只读恢复:'+str(self.selected()),'接续只读恢复:'+str(self.selected())))
-        self.account_toggle.setText(('正在处理…' if account_busy else '关闭账号' if self.browser_live.get(self.selected()) else '启动账号'))
+        account_busy=self.selected() in self.backend_jobs or any(k in self.busy for k in ('启动账号:'+str(self.selected()),'关闭账号:'+str(self.selected()),'打开交互浏览器:'+str(self.selected()),'返回后台:'+str(self.selected()),'只读恢复:'+str(self.selected()),'接续只读恢复:'+str(self.selected())))
+        self.account_toggle.setText(('处理中…' if account_busy else '停止并退出账号' if self.browser_live.get(self.selected()) else '连接账号'))
         self.account_toggle.setEnabled(active and not account_busy)
         for b in self.account_actions:
-            if b.text() in ('启动账号','打开账号浏览器','返回后台学习'):b.setEnabled(active and not account_busy)
+            if b.text() in ('显示学习网页','隐藏网页，保留学习'):b.setEnabled(active and not account_busy)
+        from dashboard import state_label
+        row=self.rows.get(self.selected(),{});current=row.get('current') or {}
+        browser='已连接' if self.browser_live.get(self.selected()) else '未连接' if self.selected() in self.browser_live else '正在检查'
+        next_step=('请点击“显示学习网页”，完成本人验证后会接续。' if row.get('user_action_required') else
+            '正在学习：'+current.get('chapter','当前课程') if row.get('status') in ('running','awaiting_review') else
+            '所选课程已完成，可在高级工具查看完成明细。' if state_label(row)=='课程已完成' else
+            '下一步：点击“选择课程”，勾选后开始学习。')
+        self.account_summary.setText(f'账号连接：{browser}  ·  课程状态：{state_label(row)}\n{next_step}' if active else '先添加本人账号，登录成功后选择课程。')
+        running=row.get('status') in ('running','awaiting_review','awaiting_verification')
+        self.queue_toggle.setText('暂停学习' if running else '继续上次学习')
+        self.queue_toggle.setEnabled(active and bool(current) and '队列操作:'+str(self.selected()) not in self.busy)
         count=len(self.queue_drafts.get(self.selected(),[]))
-        self.start_queue_button.setText(f'开始完成所选课程（{count}门）')
+        self.start_queue_button.setText(f'开始学习（已选 {count} 门）')
         self.start_queue_button.setEnabled(active and count>0 and '启动队列:'+str(self.selected()) not in self.busy)
         exam_busy=any(k in self.busy for k in ('考试执行:'+str(self.selected()),'考试审阅:'+str(self.selected()),'考试预览:'+str(self.selected())))
-        exam_busy=exam_busy or '考试入口:'+str(self.selected()) in self.busy
+        exam_busy=exam_busy or self.exam_operation_active(self.selected())
         for b in self.account_actions:
             if b.text() in ('整卷预览','仅审阅（不作答）','打开所选课程考试'):
                 b.setEnabled(active and not exam_busy)
         self.fill_button.setEnabled(active and not exam_busy)
         self.fill_button.setText('正在判断并作答…' if exam_busy else '读取整卷并连续作答')
     def exam_operation_active(self,a):
-        return any(k+':'+str(a) in self.busy for k in ('考试执行','考试审阅','考试预览','考试入口'))
+        return str(self.backend_jobs.get(a,{}).get('operation','')).startswith('exam_') or any(k+':'+str(a) in self.busy for k in ('考试执行','考试审阅','考试预览','考试入口'))
     def account_changed(self):
         self.render_courses();self.details();self.update_actions()
         self.filter_audit()
         if self.selected() in self.account_modes:self.queue_mode.setCurrentIndex(self.queue_mode.findData(self.account_modes[self.selected()]))
         self.exam_info.setText('先进入所选账号的目标考试，再读取整卷。')
         self.exam_rows=[];self.exam_answers.setRowCount(0);self.exam_answer_detail.clear()
+        self.dashboard.update_snapshot(self.rows,self.selected(),self.backend_snapshot)
+    def select_dashboard_account(self,account):
+        index=self.account_picker.findData(account)
+        if index>=0:self.account_picker.setCurrentIndex(index)
+        self.nav.setCurrentRow(1)
         self.exam_progress_bar.setValue(0);self.exam_progress_bar.setFormat('尚未读取试卷')
         self.poll()
     def table_selected(self):
@@ -604,6 +658,9 @@ class Window(QMainWindow):
     def queue_action(self,tool):
         a=self.selected()
         if a:self.task('队列操作:'+a,lambda:self.adapter.route(a,tool))
+    def toggle_learning(self):
+        row=self.rows.get(self.selected(),{})
+        self.queue_action('stop_learning_batch' if row.get('status') in ('running','awaiting_review','awaiting_verification') else 'resume_learning_batch')
     def show_browser(self):
         a=self.selected()
         if not a:return
@@ -675,11 +732,9 @@ class Window(QMainWindow):
         if not intent or self.exam_operation_active(a):return
         operation=intent['operation'];model=intent['model'];evidence=intent['evidence']
         def run():
-            result=self.exams.fast_stream(a,model,evidence,self.events.progress.emit)
-            if intent['auto'] and result.get('status')=='review_complete':
-                return self.adapter.route(a,'start_owned_exam_finish',authorized=True,threshold_minutes=intent['threshold'],notify_email=intent['notify'])
-            return result
-        jobs={'preview':('考试预览',lambda:self.adapter.route(a,'preview_owned_exam_questions')),
+            return self.exams.fast_stream(a,model,evidence,self.events.progress.emit,
+                auto_submit=intent['auto'],threshold=intent['threshold'],notify=intent['notify'])
+        jobs={'preview':('考试预览',lambda:self.application.run(a,'exam_preview')),
               'prepare':('考试审阅',lambda:self.exams.prepare(a,model,evidence)),'fill':('考试执行',run)}
         label,job=jobs[operation]
         if a==self.selected():self.exam_info.setText('读取当前试卷；验证或新标签页尚未就绪时等待，验证后自动接续。模型先判断，不确定题再联网复核。')
@@ -736,8 +791,10 @@ class Window(QMainWindow):
         search=('已联网核验\n'+sources) if row.get('used_web_search') else '尚无联网核验记录'
         self.exam_answer_detail.setPlainText(f"第 {row['number']} 题 · {row['status']}\n{row['question']}\n\n{options}\n\n作答选项：{row['answer'] or '待确定'}\n判断依据：{row.get('basis') or '待补充'}\n搜索来源：{search}")
     def start_review(self,a,attention,evidence,attached=None):
-        model=AttachedReview(attached,self.model if self.review_mode.currentIndex()==0 else None) if attached else self.model if self.review_mode.currentIndex()==0 else None
-        self.task('审阅 '+a,lambda:self.coordinator.review(a,attention,model,evidence))
+        if not self.application:return
+        parameters={'attention':attention,'evidence':evidence,'attached':attached,
+            'cache_only':self.review_mode.currentIndex()==1,'model_revision':getattr(self.model,'revision',None)}
+        self.task('审阅 '+a,lambda:self.application.run(a,'review',parameters))
     def provider_changed(self,name):
         saved=self.profiles.get(name,{})
         self.endpoint.setText(saved.get('endpoint',PRESETS.get(name,'')))
@@ -752,25 +809,16 @@ class Window(QMainWindow):
                 'key':self.key.text() or old.get('key',''),'effort':self.effort.currentData(),
                 'token_limit':self.token_limit.value(),'use_system_proxy':self.system_proxy.isChecked()}
     def fetch_models(self):
+        if not self.application:return
         config=self.configuration();provider=self.provider.currentText()
-        def test():
-            start=time.monotonic();models=discover_models(config['endpoint'],config['key'],config['use_system_proxy'])
-            return {'provider':provider,'config':config,'models':models,'latency_ms':round((time.monotonic()-start)*1000)}
-        self.task('模型列表',test)
+        self.task('模型列表',lambda:self.application.call('discover',provider=provider,config=config))
     def configure_model(self):
-        try:
-            config=self.configuration()
-            if not config['model']:
-                self.model_status.setText('尚未选择模型，正在读取当前服务的可用模型；返回后请选择模型并再次点击应用。')
-                self.fetch_models();return
-            self.model=ModelReviewer(**config)
-            self.profiles[self.provider.currentText()]={**config,'models':[self.model_name.itemText(i) for i in range(self.model_name.count())]}
-            self.active_provider=self.provider.currentText()
-        except Exception as e:self.failed('配置模型',str(e));return
-        self.key.clear();self.model_status.setText('已启用 '+self.provider.currentText()+' / '+self.model.model+' · 密钥仅存于内存')
-        if self.adapter:
-            saved={**config,'_profiles':self.profiles,'_active_profile':self.active_provider}
-            self.task('保存模型配置',lambda:self.adapter.call('configure_desktop_preferences',{'reviewer_config':saved,'auto_review':self.auto.isChecked()}))
+        if not self.application:return
+        config=self.configuration();provider=self.provider.currentText()
+        if not provider or not config['model']:
+            self.model_status.setText('请手动选择服务商和模型，再应用配置。读取列表不会自动启用模型。');return
+        self.model_status.setText('正在应用所选模型；当前运行中的任务保留原配置…')
+        self.task('应用模型配置',lambda:self.application.call('configure',provider=provider,config=config))
     def new_profile(self,copy_current=False):
         name,ok=QInputDialog.getText(self,'模型配置','配置名称（例如 DeepSeek 主用 / 备用）')
         if not ok or not name.strip():return
@@ -819,7 +867,7 @@ class Window(QMainWindow):
         for name,field in fields.items():form.addRow(name,field)
         mode=QComboBox();mode.addItem('无头 · 无浏览器窗口','headless');mode.addItem('有窗口 · 启动后最小化','minimized');form.addRow('浏览器模式',mode)
         mode.setCurrentIndex(1)
-        form.addRow(QLabel('点击“登录并启动浏览器”后启动此账号独立浏览器。课程学习请到“课程队列”选择后再启动。'))
+        form.addRow(QLabel('点击“登录并启动浏览器”后启动此账号独立浏览器。课程学习请到“课程学习”勾选后点击开始学习。'))
         buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText('登录并启动浏览器')
         def validate():
@@ -842,15 +890,16 @@ class Window(QMainWindow):
         if self.tray is not None and not self.exit_requested:
             self.hide();event.ignore();return
         self.closed=True
-        self.timer.stop();self.auto.setChecked(False)
-        if self.exams:
-            with self.exams.guard:
-                for stop in self.exams.stops.values():stop.set()
+        self.timer.stop()
+        if self.application:self.application.closed.set()
         # Closing the UI does not stop or kill the backend/browser workers.
         self.pool.shutdown(wait=False,cancel_futures=True);event.accept()
 
 def main():
     adapter=None;pairing={}
+    if not any(flag in sys.argv for flag in ('--paired','--preview-only','--smoke-test')):
+        from chaoxing_learning_mcp.desktop_host import main as host_main
+        return host_main()
     if '--paired' in sys.argv:
         pairing=json.loads(sys.stdin.readline());adapter=StudyFlowAdapter(pairing['port'],pairing['token'])
     elif '--preview-only' not in sys.argv:

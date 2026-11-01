@@ -1,6 +1,6 @@
 [project]
 name = "studyflow-mcp"
-version = "1.9.8"
+version = "1.10.0"
 description = "StudyFlow MCP for Chaoxing course tasks and exams"
 requires-python = ">=3.11"
 license = {file = "LICENSE"}
@@ -22,5 +22,5 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-chaoxing_learning_mcp = ["assets/*.js", "assets/*.cjs", "assets/*.json"]
+chaoxing_learning_mcp = ["assets/*.js", "assets/*.cjs", "assets/*.json", "assets/*.svg", "assets/*.ico", "assets/*.png"]
 

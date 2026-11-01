@@ -92,3 +92,11 @@ def test_imported_account_without_worker_has_normal_stopped_browser_status(monke
     assert health['account_id']=='fixture' and health['state']=='not_started'
     assert health['browser_polled'] is False
 
+
+def test_pairing_preferences_never_return_saved_model_credentials(monkeypatch):
+    monkeypatch.setattr(g,'_preferences',{'model_config':{'model':'chosen','key':'fixture-private'},
+        'profiles':{'Chosen':{'key':'fixture-private','endpoint':'https://example.com'}}})
+    assert 'fixture-private' not in str(g.public_preferences())
+    assert g.public_preferences()['model_config']['model']=='chosen'
+    assert g._preferences['model_config']['key']=='fixture-private'
+

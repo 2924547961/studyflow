@@ -100,6 +100,9 @@ def test_two_required_videos_play_and_finish_in_dom_order(monkeypatch,tmp_path):
                 assert not result['sample']['paused'] and result['sample']['playback_rate']==1.25
                 assert d._state['video_watch']['media_progress']['next_video_number']==number
                 page.wait_for_timeout(250);d._state['video_watch']['due']=time.monotonic()
+                assert d._state['video_watch']['event_received_count']>0
+                assert d._state['video_watch']['sample_source']=='player_event'
+                assert d._state['video_watch'].get('fallback_read_count',0)==0
                 d._watch_tick()
                 assert d._state['video_watch']['enabled']  # completed sibling must not stop video 2
                 deadline=time.monotonic()+8

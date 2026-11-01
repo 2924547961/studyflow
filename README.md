@@ -4,11 +4,19 @@
 
 源码与桌面程序按 [GPL-3.0-only](LICENSE) 发布，第三方组件保留各自许可；使用声明不改变开源许可证的权利与义务。详见 [第三方声明](THIRD_PARTY_NOTICES.md)。
 
-## v1.9.8 桌面与便携包
+## v1.10.0 桌面与单文件 EXE
 
-[下载 Windows 便携包](https://github.com/2924547961/studyflow/releases/latest) · [使用教程与截图](docs/使用教程.md) · [故障处理与回归](docs/故障处理与回归.md) · [版本说明](docs/release-v1.9.8.md)
+[下载 Windows 单文件 EXE](https://github.com/2924547961/studyflow/releases/latest) · [使用教程与截图](docs/使用教程.md) · [前后端架构](docs/前后端架构.md) · [故障处理与回归](docs/故障处理与回归.md) · [版本说明](docs/release-v1.10.0.md)
 
-下载v1.9.8单文件EXE后直接运行；旧版便携ZIP需完整解压，再双击 `StudyFlow.exe`。无需另装 Python；使用本机 Microsoft Edge。课程自动读取，已有账号使用启动/关闭状态按钮。源码也可直接运行 `python desktop/app.py`，首次启动自动连接本地后端。
+下载单文件 EXE 后直接运行，无需另装 Python；浏览器使用本机 Microsoft Edge。保留原生桌面界面，模型调用、任务和恢复逻辑由独立后台进程管理。关闭桌面不会中断后台，再次启动会连接原服务。
+
+新增学习总览、深蓝侧栏及原创书页图标。网页播放器事件同步真实播放位置，桌面通过事件流即时更新；事件静默超过15秒才进行兜底读取。平台目录与评分仍独立核验，不把播放时间当作已完成。
+
+模型服务须人工选择服务商与模型并应用，读取可用列表不会自动选择首项。API Key 仅保留在本次后台内存中，源码、EXE 和导出配置不内置真实密钥。
+
+![学习总览（演示数据）](docs/images/overview-v1.10.png)
+
+源码运行：安装项目及桌面依赖后执行 `python desktop/app.py`。窗口、托盘、EXE 使用同一图标；矢量源文件和多尺寸 ICO 位于 `src/chaoxing_learning_mcp/assets/`。
 
 ## 当前直接执行路线（1.9.1，2026-10-21）
 

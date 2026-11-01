@@ -15,8 +15,8 @@ spec=spec[:spec.index('pyz = PYZ')]+'''
 a.binaries=[row for row in a.binaries if Path(row[0]).name.lower() not in ('icuuc.dll','icudt78.dll')]
 pyz=PYZ(a.pure)
 exe=EXE(pyz,a.scripts,a.binaries,a.datas,[],name=OUTPUT_NAME,debug=False,
-        strip=False,upx=True,console=True)
-'''.replace('OUTPUT_NAME',repr('StudyFlow-'+version+'-Windows-x64'))
+        strip=False,upx=True,console=True,icon=APP_ICON)
+'''.replace('OUTPUT_NAME',repr('StudyFlow-'+version+'-Windows-x64')).replace('APP_ICON',repr(str(root/'src/chaoxing_learning_mcp/assets/studyflow.ico')))
 spec='from pathlib import Path\n'+spec
 target=root/'work/pyinstaller/StudyFlow-single.spec';target.write_text(spec,encoding='utf-8')
 subprocess.run([sys.executable,'-m','PyInstaller','--noconfirm','--distpath',str(root/'dist-single'),

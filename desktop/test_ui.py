@@ -11,6 +11,15 @@ from theme import STYLE
 
 
 class UITests(unittest.TestCase):
+    def test_submission_timeout_starts_readback_and_resumes_only_if_verified(self):
+        w=Window();w.timer.stop();w.adapter=Mock();jobs=[];w.task=lambda key,fn:jobs.append((key,fn))
+        w.failed('审阅 fixture','RPC_OPERATION_FAILED_OR_UNKNOWN')
+        self.assertEqual(jobs[-1][0],'提交回读恢复:fixture')
+        jobs.pop()[1]();w.adapter.route.assert_called_with('fixture','recover_chapter_submission_readback')
+        w.done('提交回读恢复:fixture',{'recovered':True,'grading':{'score':100}})
+        self.assertEqual(jobs[-1][0],'接续课程:fixture')
+        jobs.pop()[1]();w.adapter.route.assert_called_with('fixture','resume_learning_batch')
+        w.close()
     @classmethod
     def setUpClass(cls):
         cls.app=QApplication.instance() or QApplication([]);cls.app.setStyleSheet(STYLE)

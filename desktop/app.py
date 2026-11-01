@@ -256,6 +256,16 @@ class Window(QMainWindow):
             self.summary.setText(f"{len(accounts)} 个账号    /    {sum(a.get('status')=='running' for a in accounts)} 个运行中    /    {sum(a.get('user_action_required',False) for a in accounts)} 个需本人处理")
             if selected != self.selected():self.render_courses();self.details()
             self.update_actions()
+        elif key.startswith('提交回读恢复:'):
+            aid=key.split(':',1)[1]
+            if data.get('recovered'):
+                self.last_errors.pop('审阅 '+aid,None)
+                self.append_audit({'account':aid,'event':'提交超时已只读恢复','result':data.get('grading',{}),'automatic_resubmit':False})
+                self.task('接续课程:'+aid,lambda aid=aid:self.adapter.route(aid,'resume_learning_batch'))
+            elif data.get('reason') in ('ORIGINAL_OWNER_NOT_IDLE','READBACK_PENDING','GRADING_PENDING') and self.submission_checks.get(aid,0)<6:
+                self.submission_checks[aid]=self.submission_checks.get(aid,0)+1
+                QTimer.singleShot(5000,lambda aid=aid:self.task('提交回读恢复:'+aid,lambda:self.adapter.route(aid,'recover_chapter_submission_readback')))
+            else:self.append_audit({'account':aid,'event':'提交只读核验待处理','error':data.get('reason','GRADING_READBACK_FAILED'),'automatic_resubmit':False})
         elif key.startswith('通知记录 '):
             aid=key.split(' ',1)[1]
             if aid==self.selected():self.qr_status.setText('验证二维码：'+str(data.get('qr_status') or '当前无需验证')+' · 邮件：'+str(data.get('notice_status') or '等待'))
@@ -408,6 +418,9 @@ class Window(QMainWindow):
                 self.exam_info.setText('等待本人进入考试或完成验证；检测到该账号新试卷标签后自动接续，无需再次点击。')
                 self.update_actions();return
             self.exam_intents.pop(aid,None)
+        if key.startswith('审阅 ') and error=='RPC_OPERATION_FAILED_OR_UNKNOWN' and self.adapter:
+            aid=key.split(' ',1)[1];self.submission_checks=getattr(self,'submission_checks',{});self.submission_checks[aid]=0
+            self.task('提交回读恢复:'+aid,lambda:self.adapter.route(aid,'recover_chapter_submission_readback'))
         self.last_errors[key]=error
         error=ERRORS.get(error,error)
         if key.startswith(('考试入口:','考试预览:','考试审阅:','考试执行:')):self.exam_info.setText(key+'：'+error)

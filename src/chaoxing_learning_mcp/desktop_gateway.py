@@ -22,7 +22,7 @@ ALLOWED = frozenset({'parallel_learning_status', 'parallel_account_tool',
     'setup_learning_accounts', 'configure_smtp_sender', 'smtp_notification_status',
     'desktop_accounts', 'desktop_account_tool', 'start_parallel_learning_batches', 'desktop_report_state',
     'import_accounts','login_accounts','configure_desktop_preferences','start_account_workspace'})
-ROUTED = frozenset({'browser_status','inspect_current_task','observe_chapter_quiz',
+ROUTED = frozenset({'recover_chapter_submission_readback','browser_status','inspect_current_task','observe_chapter_quiz',
     'read_owned_exam_observation',
     'refresh_owned_exam_adapter',
     'verify_owned_exam_saved_answer',
@@ -128,6 +128,19 @@ def desktop_report_state(client_state: dict):
 def desktop_account_tool(account_id: str, tool_name: str, arguments: dict | None = None):
     """Explicit account routing; never switch the current browser to answer another account."""
     from . import course_direct as d, course_tasks as tasks, parallel_runner as p, smtp_notifications as mail
+    if tool_name=='recover_chapter_submission_readback' and account_id not in tasks._accounts:raise ValueError('UNKNOWN_ACCOUNT')
+    if tool_name=='recover_chapter_submission_readback' and account_id in p._sessions:
+        p.REVIEW_TOOLS.update({'refresh_desktop_implementation','desktop_account_tool'})
+        p.parallel_account_tool(account_id,'refresh_desktop_implementation',{})
+        return p.parallel_account_tool(account_id,'desktop_account_tool',{'account_id':account_id,'tool_name':tool_name,'arguments':{}})
+    if tool_name=='recover_chapter_submission_readback' and d._state.get('account_id')==account_id:
+        try:
+            import importlib
+            from . import submission_readback
+            importlib.reload(submission_readback)
+            return submission_readback.recover_chapter_submission_readback(account_id)
+        except Exception as exc:
+            return {'recovered':False,'error_type':type(exc).__name__,'reason':str(exc)[:180],'submission_replayed':False}
     if tool_name not in ROUTED: raise ValueError('ROUTE_NOT_ALLOWED')
     p.REVIEW_TOOLS.update(ROUTED)
     if account_id not in tasks._accounts: raise ValueError('UNKNOWN_ACCOUNT')
@@ -264,5 +277,9 @@ def _handle_post(self):
 
 def install_handler():
     if _gateway:_gateway[0].RequestHandlerClass.do_POST=_handle_post
+    from .studyflow import server
+    if 'desktop_account_tool' in {t.name for t in server._tool_manager.list_tools()}:
+        server.remove_tool('desktop_account_tool')
+    server.add_tool(desktop_account_tool)
 
 if _gateway:install_handler()

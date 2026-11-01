@@ -29,3 +29,12 @@ def test_custom_rate_limit_keeps_existing_delivery_reservation(tmp_path):
     assert mail_rate_limit.reserve('fixture','fixture@example.com',directory=tmp_path,now=1000)==0
     assert mail_rate_limit.reserve('fixture','fixture@example.com',directory=tmp_path,now=1299,interval=300)==1
     assert mail_rate_limit.reserve('fixture','fixture@example.com',directory=tmp_path,now=1300,interval=300)==0
+
+
+def test_qr_autorefresh_setting_is_explicit_and_defaults_on(monkeypatch):
+    monkeypatch.setattr(course_tasks,'_accounts',{'fixture':object()})
+    monkeypatch.setattr(n,'_auto_qr',{})
+    monkeypatch.setattr(n,'_arm_interval_timer',Mock())
+    assert n.configure_notification_interval('fixture',60,auto_refresh_qr=False)['auto_refresh_qr'] is False
+    assert not n._auto_qr['fixture']
+    assert n.configure_notification_interval('fixture',60)['auto_refresh_qr'] is True

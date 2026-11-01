@@ -45,7 +45,7 @@ class UITests(unittest.TestCase):
         w=Window();w.timer.stop();w.adapter=Mock();jobs=[];w.task=lambda k,fn:jobs.append((k,fn))
         w.done('status',{'accounts':[{'account_id':'fixture','status':'ready','current':{}}]})
         w.mail_interval.setValue(15);w.bind_mail();jobs[-1][1]()
-        w.adapter.route.assert_called_with('fixture','configure_notification_interval',minutes=15)
+        w.adapter.route.assert_called_with('fixture','configure_notification_interval',minutes=15,auto_refresh_qr=True)
         w.close()
 
     def test_multiple_video_card_displays_current_task_and_confirmed_count(self):

@@ -125,6 +125,8 @@ def build_ui(w):
     recipients.addWidget(label('常规邮件间隔'))
     w.mail_interval=QSpinBox();w.mail_interval.setRange(1,1440);w.mail_interval.setValue(60);w.mail_interval.setSuffix(' 分钟');recipients.addWidget(w.mail_interval)
     b=button('保存通知设置',w.bind_mail);recipients.addWidget(b);w.account_actions.append(b);sl.addLayout(recipients)
+    w.auto_qr=QCheckBox('自动发送本人验证二维码；失效后刷新并发送最新二维码');w.auto_qr.setChecked(True);sl.addWidget(w.auto_qr)
+    w.qr_status=label('验证二维码：等待读取状态','muted');sl.addWidget(w.qr_status)
     w.mail_info=QPlainTextEdit();w.mail_info.setReadOnly(True);sl.addWidget(w.mail_info,1)
     sl.addWidget(label('常规邮件默认60分钟；修改后重新计时并保留未汇总记录。本人验证截图仍按验证事件去重和时效检查。','muted'))
     ll=page('事件记录','只看课程完成、题目答案与平台正确率、实际邮件。运行状态和实时视频进度请看“账号与浏览器”。')

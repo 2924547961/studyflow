@@ -27,6 +27,7 @@ _playback_jobs = queue.Queue(maxsize=32)
 _playback_worker = None
 _mail_history = globals().get('_mail_history',{})
 _notification_intervals=globals().get('_notification_intervals',{})
+_auto_qr=globals().get('_auto_qr',{})
 _notification_timers=globals().get('_notification_timers',{})
 _EMAIL = re.compile(r'[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+')
 
@@ -64,16 +65,18 @@ def _arm_interval_timer(account_id):
     _notification_timers[account_id]=timer;timer.start()
 
 
-def configure_notification_interval(account_id:str,minutes:int=60):
+def configure_notification_interval(account_id:str,minutes:int=60,auto_refresh_qr:bool=True):
     from .course_tasks import _accounts
     from . import hourly_reports
     if account_id not in _accounts:raise ValueError('Unknown learning account')
     if isinstance(minutes,bool) or not isinstance(minutes,int) or not 1<=minutes<=1440:
         raise ValueError('Notification interval must be 1..1440 minutes')
-    with _lock:_notification_intervals[account_id]=minutes*60
+    with _lock:
+        _notification_intervals[account_id]=minutes*60
+        _auto_qr[account_id]=bool(auto_refresh_qr)
     hourly_reports.reporter.set_interval(account_id,minutes*60);hourly_reports._wake.set()
     _arm_interval_timer(account_id)
-    return {'configured':True,'account_id':account_id,'notification_interval_minutes':minutes,'mail_sent':False}
+    return {'configured':True,'account_id':account_id,'notification_interval_minutes':minutes,'auto_refresh_qr':bool(auto_refresh_qr),'mail_sent':False}
 
 
 def configure_smtp_sender(sender_email: str = '', smtp_auth_code: str = '', enabled: bool = True) -> dict[str, Any]:
@@ -138,7 +141,7 @@ def smtp_notification_status(account_id: str) -> dict[str, Any]:
         return {'account_id':account_id,'enabled':bool(cfg),
                 'sender':cfg['sender'] if cfg else None,'recipient':cfg['recipient'] if cfg else _recipients.get(account_id),
                 'waiting_for_shared_sender':account_id in _recipients and not cfg,
-                'verification_active':e.get('active',False),'notice_status':e.get('status','idle'),
+                'auto_refresh_qr':_auto_qr.get(account_id,True),'verification_active':e.get('active',False),'notice_status':e.get('status','idle'),
                 'sent_count':e.get('sent_count',0),'error_type':e.get('error_type'),
                 'qr_status':e.get('qr_status'),'refresh_pending':e.get('refresh_pending',False),
                 'refresh_count':e.get('refresh_count',0),'playback_health':health,
@@ -354,7 +357,7 @@ def observe_gate(page, frame, account_id, kind):
     No QR URL requests, token decoding, verification submission, or face bypass.
     """
     with _lock:
-        if not _resolved_config(account_id):return
+        if not _resolved_config(account_id) or not _auto_qr.get(account_id,True):return
         # A fresh visible gate after a completed episode has a new QR identity.
         # Never compare it with the previous episode's verified refresh hash.
         previous=_events.get(account_id)

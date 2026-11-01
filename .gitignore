@@ -18,3 +18,4 @@ work/
 dist/
 build/
 *.spec
+dist-single/

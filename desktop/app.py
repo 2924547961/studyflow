@@ -258,6 +258,7 @@ class Window(QMainWindow):
             self.update_actions()
         elif key.startswith('通知记录 '):
             aid=key.split(' ',1)[1]
+            if aid==self.selected():self.qr_status.setText('验证二维码：'+str(data.get('qr_status') or '当前无需验证')+' · 邮件：'+str(data.get('notice_status') or '等待'))
             for mail in data.get('mail_history',[]):
                 identity=(aid,mail.get('id'))
                 if identity not in self.mail_seen and mail.get('status')!='sending':
@@ -390,6 +391,8 @@ class Window(QMainWindow):
                 if state['account_id']==self.selected():
                     self.recipient.setText(state.get('recipient') or '')
                     self.mail_interval.setValue(state.get('notification_interval_minutes',60))
+                    self.auto_qr.setChecked(state.get('auto_refresh_qr',True))
+                    self.qr_status.setText('验证二维码：'+str(state.get('qr_status') or '当前无需验证')+' · 邮件：'+str(state.get('notice_status') or '等待')+' · 收件人：'+str(state.get('recipient') or '未配置'))
             self.mail_info.setPlainText('\n'.join(lines))
         else:
             self.last_errors.pop(key,None)
@@ -704,10 +707,10 @@ class Window(QMainWindow):
         self.task('邮件配置',lambda:self.adapter.call('configure_smtp_sender',{'sender_email':email,'smtp_auth_code':secret}))
     def bind_mail(self):
         a=self.selected();recipient=self.recipient.text().strip()
-        minutes=self.mail_interval.value()
+        minutes=self.mail_interval.value();auto_qr=self.auto_qr.isChecked()
         def save():
             if recipient:self.adapter.route(a,'bind_account_notification_email',recipient_email=recipient)
-            return self.adapter.route(a,'configure_notification_interval',minutes=minutes)
+            return self.adapter.route(a,'configure_notification_interval',minutes=minutes,auto_refresh_qr=auto_qr)
         if a:self.task('通知设置:'+a,save)
     def add_account(self):
         if not self.adapter:return

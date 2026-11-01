@@ -5,6 +5,27 @@ from unittest.mock import Mock
 import pytest
 from chaoxing_learning_mcp import course_direct as direct, course_extension
 
+def test_browser_status_reads_cached_lifecycle_without_worker_rpc(monkeypatch):
+    browser=Mock();browser.is_connected.return_value=True
+    page=Mock();page.is_closed.return_value=False
+    monkeypatch.setattr(direct,'_state',{'browser':browser,'page':page})
+    monkeypatch.setattr(direct,'_worker_failed',True)
+    monkeypatch.setattr(direct,'_run',Mock(side_effect=AssertionError('status must never queue RPC')))
+    result=direct.browser_status()
+    assert result['running'] and result['worker_failed']
+
+def test_browser_status_does_not_wait_for_an_account_writer(monkeypatch):
+    browser=Mock();browser.is_connected.return_value=True
+    page=Mock();page.is_closed.return_value=False
+    monkeypatch.setattr(direct,'_state',{'browser':browser,'page':page})
+    result=[]
+    with direct._operation_lock:
+        thread=threading.Thread(target=lambda:result.append(direct.browser_status()))
+        thread.start();thread.join(timeout=.5)
+        independent=not thread.is_alive()
+    thread.join(timeout=1)
+    assert independent and result[0]['running']
+
 
 @pytest.fixture(autouse=True)
 def isolated_state(monkeypatch):

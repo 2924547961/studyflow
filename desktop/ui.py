@@ -137,6 +137,13 @@ def build_ui(w):
     w.log_search=QLineEdit();w.log_search.setPlaceholderText('筛选账号 / 答题 / 评分 / 通知 / 错误');w.log_search.textChanged.connect(w.filter_audit);ll.addWidget(w.log_search)
     w.log=QPlainTextEdit();w.log.setReadOnly(True);w.log.setPlaceholderText('当前账号暂无新记录。课程完成、题目判分或邮件发送后在此显示。');w.log.document().setMaximumBlockCount(5000);ll.addWidget(w.log,1)
     w.log_raw=QPlainTextEdit();w.log_raw.setReadOnly(True);w.log_raw.setMaximumHeight(220);w.log_raw.hide();ll.addWidget(w.log_raw)
+    w.nav.addItem('帮助与自动恢复')
+    hl=page('帮助与自动恢复','自动按故障类型检查、恢复和复测；此页用于查看说明和处理结果，无需手工点击修复。')
+    from PyQt6.QtWidgets import QTextBrowser
+    from help_content import HELP
+    w.help_document=QTextBrowser();w.help_document.setMarkdown(HELP);hl.addWidget(w.help_document,1)
+    w.help_recovery=QPlainTextEdit();w.help_recovery.setReadOnly(True);w.help_recovery.setMaximumHeight(150)
+    w.help_recovery.setPlaceholderText('自动恢复已启用。发生故障后显示账号、原因、处理动作与结果。');hl.addWidget(w.help_recovery)
     w.nav.currentRowChanged.connect(pages.setCurrentIndex);w.nav.currentTextChanged.connect(w.heading.setText);w.nav.setCurrentRow(0)
     w.account_picker.currentIndexChanged.connect(w.account_changed);w.table.itemSelectionChanged.connect(w.table_selected)
     w.update_actions()

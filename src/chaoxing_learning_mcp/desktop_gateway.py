@@ -22,7 +22,7 @@ ALLOWED = frozenset({'parallel_learning_status', 'parallel_account_tool',
     'setup_learning_accounts', 'configure_smtp_sender', 'smtp_notification_status',
     'desktop_accounts', 'desktop_account_tool', 'start_parallel_learning_batches', 'desktop_report_state',
     'import_accounts','login_accounts','configure_desktop_preferences','start_account_workspace'})
-ROUTED = frozenset({'recover_chapter_submission_readback','browser_status','inspect_current_task','observe_chapter_quiz',
+ROUTED = frozenset({'runtime_health','defer_current_learning_task','recover_current_task','recover_chapter_submission_readback','browser_status','inspect_current_task','observe_chapter_quiz',
     'read_owned_exam_observation',
     'refresh_owned_exam_adapter',
     'verify_owned_exam_saved_answer',
@@ -161,6 +161,9 @@ def desktop_account_tool(account_id: str, tool_name: str, arguments: dict | None
     if tool_name == 'bind_account_notification_email':
         return mail.bind_account_notification_email(account_id, args['recipient_email'])
     if tool_name=='configure_notification_interval':return mail.configure_notification_interval(**args)
+    if tool_name=='browser_status' and d._state.get('account_id')!=account_id:
+        return {'account_id':account_id,'running':False,'worker_failed':False,
+                'generation':None,'state':'not_started','submit_attempted':False}
     if d._state.get('account_id') != account_id:
         raise ValueError('ACCOUNT_BROWSER_NOT_RUNNING')
     from . import batch_runner

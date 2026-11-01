@@ -11,6 +11,50 @@ from theme import STYLE
 
 
 class UITests(unittest.TestCase):
+    def test_help_is_bundled_and_no_manual_repair_button_or_embedded_key(self):
+        from PyQt6.QtWidgets import QPushButton
+        w=Window();w.timer.stop();w.task=Mock()
+        self.assertIn('帮助与自动恢复',[w.nav.item(i).text() for i in range(w.nav.count())])
+        self.assertIn('API Key',w.help_document.toPlainText())
+        self.assertEqual(w.key.text(),'')
+        self.assertFalse(any(b.text()=='修复当前账号' for b in w.findChildren(QPushButton)))
+        w.close()
+
+    def test_automatic_repair_keeps_unknown_submission_protection(self):
+        w=Window();w.timer.stop();w.task=Mock();w.adapter=Mock()
+        w.adapter.route.side_effect=[{'unknown_submission':True},{'recovered':False,'reason':'GRADING_PENDING'}]
+        result=w.auto_repair('fixture')
+        self.assertFalse(result['recovered'])
+        self.assertEqual([c.args[1] for c in w.adapter.route.call_args_list],['runtime_health','recover_chapter_submission_readback'])
+        w.close()
+
+    def test_automatic_repair_defers_only_twice_observed_unpublished_quiz(self):
+        w=Window();w.timer.stop();w.task=Mock();w.adapter=Mock()
+        w.adapter.route.side_effect=[{}, {'teacher_quiz_unavailable':True}, {'teacher_quiz_unavailable':True}, {}]
+        result=w.auto_repair('fixture')
+        self.assertIn('待补',result['message'])
+        self.assertEqual([c.args[1] for c in w.adapter.route.call_args_list],['runtime_health','inspect_current_task','inspect_current_task','defer_current_learning_task'])
+        w.close()
+    def test_successful_status_clears_previous_status_error(self):
+        w=Window();w.timer.stop();w.task=Mock()
+        w.last_errors['浏览器状态:fixture']='RPC_OPERATION_FAILED_OR_UNKNOWN'
+        w.done('浏览器状态:fixture',{'running':True})
+        self.assertNotIn('浏览器状态:fixture',w.last_errors)
+        w.close()
+    def test_status_failure_with_submission_uses_grade_readback_not_media_recovery(self):
+        w=Window();w.timer.stop();w.adapter=Mock();jobs=[];w.task=lambda key,fn:jobs.append((key,fn))
+        w.done('浏览器状态:fixture',{'running':True,'worker_failed':True,'submit_attempted':True,'worker_failure_id':'one'})
+        self.assertEqual(jobs[-1][0],'提交回读恢复:fixture')
+        jobs[-1][1]();w.adapter.route.assert_called_with('fixture','recover_chapter_submission_readback')
+        w.close()
+    def test_status_failure_schedules_one_account_recovery_without_false_close(self):
+        w=Window();w.timer.stop();w.adapter=Mock();jobs=[];w.task=lambda key,fn:jobs.append((key,fn))
+        payload={'running':True,'worker_failed':True,'generation':'one'}
+        w.done('浏览器状态:fixture',payload);w.done('浏览器状态:fixture',payload)
+        self.assertTrue(w.browser_live['fixture'])
+        self.assertEqual([key for key,fn in jobs].count('只读恢复:fixture'),1)
+        jobs[0][1]();w.adapter.route.assert_called_with('fixture','recover_current_task',recover_read_worker=True)
+        w.close()
     def test_submission_timeout_starts_readback_and_resumes_only_if_verified(self):
         w=Window();w.timer.stop();w.adapter=Mock();jobs=[];w.task=lambda key,fn:jobs.append((key,fn))
         w.failed('审阅 fixture','RPC_OPERATION_FAILED_OR_UNKNOWN')

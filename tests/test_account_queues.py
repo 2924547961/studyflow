@@ -10,7 +10,7 @@ from chaoxing_learning_mcp import batch_runner as b,parallel_runner as p,course_
     (False,'inspect_owned_page',True,True),
     (True,'inspect_owned_page',True,False),
     (False,'submit_click',True,False),
-    (False,'inspect_owned_page',False,False)])
+    (False,'inspect_owned_page',False,True)])
 def test_read_worker_recovery_preserves_unknown_writes(pending,stage,available,accepted):
     page=SimpleNamespace(is_closed=lambda:not available)
     jobs=Mock()
@@ -28,6 +28,17 @@ def test_read_worker_recovery_preserves_unknown_writes(pending,stage,available,a
     if accepted:
         assert result['operation_replayed'] is False
         assert owner._state['page'] is page
+
+def test_status_timeout_can_recover_after_following_guard_errors():
+    jobs=Mock()
+    jobs.put.side_effect=lambda job:job[3].put((True,job[0]()))
+    owner=SimpleNamespace(_state={'page':SimpleNamespace(is_closed=lambda:False)},
+        course_extension=SimpleNamespace(_pending=None),_worker_failed=True,
+        _worker=SimpleNamespace(is_alive=lambda:True),_jobs=jobs,
+        _LOG=[{'stage':'browser_status','outcome':'failed','error':'Browser worker timed out; outcome unknown'},
+              {'stage':'open_account_browser','outcome':'failed','error':'restart this MCP before further actions'}])
+    assert b._recover_read_worker(owner)['ok']
+    assert not owner._worker_failed
 
 
 def test_unresponsive_read_worker_remains_locked(monkeypatch):

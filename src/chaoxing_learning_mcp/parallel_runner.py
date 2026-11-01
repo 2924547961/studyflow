@@ -459,7 +459,7 @@ def parallel_account_tool(account_id:str, tool_name:str, arguments:dict|None=Non
         return {'ok':False,'account_id':account_id,'error_code':
                 'ACCOUNT_NOT_REGISTERED' if account_id not in _records else 'WORKER_NOT_CONNECTED',
                 'next_action':'add_parallel_learning_accounts' if account_id not in _records else 'inspect_parallel_account_status'}
-    cached=tool_name in ('learning_batch_status','smtp_notification_status') or tool_name=='owned_exam_finish_status' and not arguments.get('refresh')
+    cached=tool_name in ('browser_status','learning_batch_status','smtp_notification_status') or tool_name=='owned_exam_finish_status' and not arguments.get('refresh')
     operation=_cached_status_call(call,tool_name,arguments) if cached else call(tool_name,arguments)
     future=asyncio.run_coroutine_threadsafe(operation,_loop)
     # Timeout does not cancel/replay an in-flight account action.

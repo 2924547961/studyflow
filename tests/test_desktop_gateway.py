@@ -68,3 +68,13 @@ def test_desktop_route_installs_allowlist_without_manual_refresh(monkeypatch):
     g.desktop_account_tool('a','control_owned_video',{'action':'inspect'})
     assert 'control_owned_video' in p.REVIEW_TOOLS
     assert 'eval' not in p.REVIEW_TOOLS
+def test_imported_account_without_worker_has_normal_stopped_browser_status(monkeypatch):
+    from chaoxing_learning_mcp import desktop_gateway as gateway,course_tasks,course_direct,parallel_runner
+    monkeypatch.setattr(course_tasks,'_accounts',{'fixture':object()})
+    monkeypatch.setattr(course_direct,'_state',{'account_id':'other'})
+    monkeypatch.setattr(parallel_runner,'_sessions',{})
+    monkeypatch.setattr(parallel_runner,'_local_account',None)
+    result=gateway.desktop_account_tool('fixture','browser_status')
+    assert result['running'] is False and result['state']=='not_started'
+    assert result['account_id']=='fixture'
+

@@ -711,16 +711,14 @@ def _confirm_submission_dialog(page) -> bool:
     return True
 
 
-@_serialized
 def browser_status() -> dict[str, Any]:
-    """Owned-browser lifecycle state plus the recent stage log."""
-    running = False
-    if _state.get("page") is not None and not _worker_failed:
-        running = _run(lambda: _state["browser"].is_connected() and not _state["page"].is_closed())
+    """Read cached lifecycle flags atomically without an account writer/RPC."""
     with _lock:
+        page,browser=_state.get('page'),_state.get('browser')
+        running=bool(page is not None and browser is not None and browser.is_connected() and not page.is_closed())
         return {"running": running, "account_id": _state.get("account_id"),
                 "server_pid": os.getpid(), "generation": _state.get("generation"),
-                "worker_failed": _worker_failed, "submit_attempted": _state.get("submit_attempted", False),
+                "worker_failed": _worker_failed, "worker_failure_id":next((x.get("ts") for x in reversed(_LOG) if x.get("outcome")=="failed" and "outcome unknown" in (x.get("error") or "")),None), "submit_attempted": _state.get("submit_attempted", False),
                 "channel": _state.get("channel"),
                 "headless": _state.get("headless"),
                 "browser_mode": ("headless" if _state.get("headless") else "minimized") if _state.get('headless') is not None else (_state.get('preferred_browser_mode') or os.environ.get('STUDYFLOW_BROWSER_MODE','headless')),

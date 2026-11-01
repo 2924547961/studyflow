@@ -33,7 +33,7 @@ w.model_name.setCurrentText('deepseek-chat');w.mail_interval.setValue(30)
 w.mail_info.setPlainText('演示：当前账号常规邮件间隔30分钟。\n保存设置不立即发信；配置与授权码仅保留在当前运行会话。')
 w.resize(1440,1100);w.show()
 output=root/'docs/images';output.mkdir(parents=True,exist_ok=True)
-for page,name in [(0,'accounts'),(1,'course-queue'),(2,'exam-workbench'),(4,'model-service'),(5,'mail-notifications')]:
+for page,name in [(0,'accounts'),(1,'course-queue'),(2,'exam-workbench'),(4,'model-service'),(5,'mail-notifications'),(7,'help-and-recovery')]:
     w.nav.setCurrentRow(page);w.banner.setText('示例数据 · 未连接平台 · 不启动浏览器或发送邮件')
     application.processEvents();w.grab().save(str(output/(name+'.png')))
-w.close();print('Rendered 5 screenshots with synthetic data.')
+w.close();print('Rendered screenshots with synthetic data.')

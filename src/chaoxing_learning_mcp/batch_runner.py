@@ -339,7 +339,10 @@ def _recover_read_worker(d, cancel_hung_play_wait=False):
         return {'ok':False,'error_code':'PENDING_SUBMISSION_OR_REVIEW'}
     if not d._worker_failed:return {'ok':True,'recovered':False,'browser_restarted':False}
     failed=[entry for entry in d._LOG if entry.get('outcome')=='failed']
-    if not failed or failed[-1].get('stage')!='inspect_owned_page':
+    actual=[x for x in failed if x.get('stage') in ('inspect_owned_page','browser_status','owned_window_status')
+            and 'outcome unknown' in x.get('error','')]
+    if actual:failed=[actual[-1]]
+    elif not failed or failed[-1].get('stage')!='inspect_owned_page':
         return {'ok':False,'error_code':'READ_TIMEOUT_NOT_CONFIRMED'}
     if not d._worker or not d._worker.is_alive():
         return {'ok':False,'error_code':'ORIGINAL_OWNER_NOT_ALIVE'}
@@ -383,10 +386,10 @@ def _recover_read_worker(d, cancel_hung_play_wait=False):
     d._jobs.put((probe,(),{},done))
     try:ok,available=done.get(timeout=5)
     except queue.Empty:return {'ok':False,'error_code':'ORIGINAL_OWNER_STILL_UNRESPONSIVE'}
-    if not ok or available is not True:
+    if not ok or not isinstance(available,bool):
         return {'ok':False,'error_code':'ORIGINAL_PAGE_NOT_AVAILABLE'}
     d._worker_failed=False
-    return {'ok':True,'recovered':True,'browser_restarted':False,'operation_replayed':False}
+    return {'ok':True,'recovered':True,'original_page_closed':not available,'browser_restarted':False,'operation_replayed':False}
 
 
 def recover_current_task(renew_session: bool = False, recover_read_worker: bool = False,

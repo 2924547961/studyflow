@@ -238,8 +238,16 @@ class Window(QMainWindow):
                     (str(a.get('attention','')).startswith('Video ended; confirm platform directory') or a.get('attention')=='Playback needs inspection') and recovery not in self.recoveries):
                     self.recoveries.add(recovery)
                     self.task('自动目录复核 '+aid,lambda aid=aid:self.recover_account(aid))
+                fault=('typed_fault',aid,current.get('chapter_id'),a.get('error_code'))
+                if (self.adapter and a.get('status')=='blocked' and a.get('error_code') in ('TASK_INSPECTION_REQUIRED','TRANSIENT_RECOVERY_EXHAUSTED')
+                    and fault not in self.recoveries and not self.exam_operation_active(aid)
+                    and '只读恢复:'+aid not in self.busy):
+                    self.recoveries.add(fault)
+                    self.help_recovery.appendPlainText(aid+'：自动检查 '+str(a.get('error_code')))
+                    self.task('自动故障处理:'+aid,lambda aid=aid:self.auto_repair(aid))
                 media=media_caption(sample,current.get('media_progress'))
-                values=[a['account_id'],('正在完成章节测验' if a.get('attention')=='chapter_quiz' else '正在处理视频弹题' if a.get('attention')=='video_question' else STATUS.get(a['status'],a['status'])),current.get('chapter') or '尚未安排任务',media,
+                recovering=any(prefix+aid in self.busy for prefix in ('只读恢复:','接续只读恢复:','提交回读恢复:','自动故障处理:'))
+                values=[a['account_id'],('正在自动恢复' if recovering else '正在完成章节测验' if a.get('attention')=='chapter_quiz' else '正在处理视频弹题' if a.get('attention')=='video_question' else STATUS.get(a['status'],a['status'])),current.get('chapter') or '尚未安排任务',media,
                         ('播放已结束 · 待平台确认' if sample.get('ended') else (f'{age:.0f}秒前'+(' · 更新延迟' if age>15 else ' · 实时')) if isinstance(age,(int,float)) else '等待采样'),a.get('attention') or '本地脚本处理中']
                 for j,v in enumerate(values):self.table.setItem(i,j,QTableWidgetItem(str(v)))
                 if a['account_id']==selected:self.table.selectRow(i)
@@ -266,6 +274,10 @@ class Window(QMainWindow):
                 self.submission_checks[aid]=self.submission_checks.get(aid,0)+1
                 QTimer.singleShot(5000,lambda aid=aid:self.task('提交回读恢复:'+aid,lambda:self.adapter.route(aid,'recover_chapter_submission_readback')))
             else:self.append_audit({'account':aid,'event':'提交只读核验待处理','error':data.get('reason','GRADING_READBACK_FAILED'),'automatic_resubmit':False})
+        elif key.startswith('自动故障处理:'):
+            aid=key.split(':',1)[1]
+            self.help_recovery.appendPlainText(aid+'：'+str(data.get('message') or data.get('reason') or data.get('status','已检查')))
+            self.append_audit({'account':aid,'event':'自动故障处理','result':data,'automatic_resubmit':False})
         elif key.startswith('通知记录 '):
             aid=key.split(' ',1)[1]
             if aid==self.selected():self.qr_status.setText('验证二维码：'+str(data.get('qr_status') or '当前无需验证')+' · 邮件：'+str(data.get('notice_status') or '等待'))
@@ -367,7 +379,22 @@ class Window(QMainWindow):
                 self.model_name.clear();self.model_name.addItems(data['models']);self.key.clear()
             self.model_status.setText(f"连接通过 · {data.get('latency_ms','—')} ms · {len(data['models'])} 个可选模型；选择后点击应用")
         elif key.startswith('浏览器状态:'):
-            self.browser_live[key.split(':',1)[1]]=bool(data.get('running'));self.update_actions()
+            aid=key.split(':',1)[1];self.browser_live[aid]=bool(data.get('running'))
+            scene=('readonly_worker',aid,data.get('worker_failure_id') or data.get('generation'))
+            if data.get('worker_failed') and scene not in self.recoveries:
+                self.recoveries.add(scene)
+                if data.get('submit_attempted'):
+                    self.submission_checks=getattr(self,'submission_checks',{});self.submission_checks[aid]=0
+                    self.task('提交回读恢复:'+aid,lambda aid=aid:self.adapter.route(aid,'recover_chapter_submission_readback'))
+                else:self.task('只读恢复:'+aid,lambda aid=aid:self.adapter.route(aid,'recover_current_task',recover_read_worker=True))
+            self.update_actions()
+        elif key.startswith('只读恢复:'):
+            aid=key.split(':',1)[1]
+            if data.get('ok'):
+                self.account_feedback.setText(aid+'：原控制线程已恢复，正在接续原任务。')
+                self.task('接续只读恢复:'+aid,lambda aid=aid:self.recover_after_status_fault(aid))
+            else:self.account_feedback.setText(aid+'：只读恢复保留现场 · '+str(data.get('error_code')))
+
         elif key.startswith('关闭账号:'):
             aid=key.split(':',1)[1]
             if data.get('ok') is not True:self.failed(key,data.get('error_code','SUBMISSION_PENDING_KEEP_BROWSER'));return
@@ -421,6 +448,7 @@ class Window(QMainWindow):
         if key.startswith('审阅 ') and error=='RPC_OPERATION_FAILED_OR_UNKNOWN' and self.adapter:
             aid=key.split(' ',1)[1];self.submission_checks=getattr(self,'submission_checks',{});self.submission_checks[aid]=0
             self.task('提交回读恢复:'+aid,lambda:self.adapter.route(aid,'recover_chapter_submission_readback'))
+        self.help_recovery.appendPlainText(key+'：'+str(error))
         self.last_errors[key]=error
         error=ERRORS.get(error,error)
         if key.startswith(('考试入口:','考试预览:','考试审阅:','考试执行:')):self.exam_info.setText(key+'：'+error)
@@ -432,6 +460,39 @@ class Window(QMainWindow):
             self.banner.setText('部分状态读取暂未成功，正在重新同步；不代表学习任务停止')
         else:self.banner.setText(f'{key}: {error} · 详情见事件记录')
         self.update_actions()
+    def auto_repair(self,aid):
+        health=self.adapter.route(aid,'runtime_health')
+        if health.get('unknown_submission'):
+            result=self.adapter.route(aid,'recover_chapter_submission_readback')
+            if result.get('recovered'):
+                self.adapter.route(aid,'resume_learning_batch')
+                result['message']='原提交已核验评分，自动接续；未重交。'
+            return result
+        if health.get('pending_review'):return {'message':'原审阅仍在处理中，保留计划并等待回执。'}
+        if health.get('browser_worker_failed'):
+            result=self.adapter.route(aid,'recover_current_task',recover_read_worker=True)
+            if not result.get('ok'):return {'message':'原线程探测待处理：'+str(result.get('error_code'))}
+            return self.recover_after_status_fault(aid)
+        task=self.adapter.route(aid,'inspect_current_task')
+        if task.get('teacher_quiz_unavailable'):
+            check=self.adapter.route(aid,'inspect_current_task')
+            if check.get('teacher_quiz_unavailable'):
+                self.adapter.route(aid,'defer_current_learning_task',issue_id='auto_teacher_unpublished',reason='两次独立只读检查确认教师未创建测验，留待补并继续其他可用任务。',evidence_url='https://mooc1.chaoxing.com/mooc-ans/work/doHomeWorkNew')
+                return {'message':'教师未发布：已自动登记待补，继续其他可用任务。'}
+        if task.get('task_state')=='video_completed':
+            self.adapter.route(aid,'monitor_owned_video',action='stop')
+            self.adapter.route(aid,'resume_learning_batch')
+            return {'message':'平台已确认媒体完成，自动核对目录并接续。'}
+        if task.get('task_state')=='video':return self.recover_after_status_fault(aid)
+        return {'message':'已自动检查，当前任务尚未加载或需外部处理；保留现场，其他账号继续。'}
+    def recover_after_status_fault(self,aid):
+        self.adapter.route(aid,'open_account_browser',show_window=False,closed_only=True)
+        task=self.adapter.route(aid,'inspect_current_task')
+        sample=task.get('sample') or {}
+        if task.get('task_state')=='video' and sample.get('paused') and not sample.get('ended'):
+            self.adapter.route(aid,'control_owned_video',action='play',rate=1.25,bring_to_front=False)
+        if task.get('task_state') not in ('video','video_completed','chapter_quiz_review'):return {'message':'等待任务界面就绪；保留当前页面。'}
+        return {**self.adapter.route(aid,'resume_learning_batch'),'message':'原账号已自动恢复并接续。'}
     def show_question_results(self):
         self.nav.setCurrentRow(6)
         self.log_current.setChecked(True)
@@ -449,7 +510,7 @@ class Window(QMainWindow):
     def update_actions(self):
         active=bool(self.adapter and self.selected())
         for b in self.account_actions:b.setEnabled(active)
-        account_busy=any(k in self.busy for k in ('启动账号:'+str(self.selected()),'关闭账号:'+str(self.selected()),'打开交互浏览器:'+str(self.selected()),'返回后台:'+str(self.selected())))
+        account_busy=any(k in self.busy for k in ('启动账号:'+str(self.selected()),'关闭账号:'+str(self.selected()),'打开交互浏览器:'+str(self.selected()),'返回后台:'+str(self.selected()),'只读恢复:'+str(self.selected()),'接续只读恢复:'+str(self.selected())))
         self.account_toggle.setText(('正在处理…' if account_busy else '关闭账号' if self.browser_live.get(self.selected()) else '启动账号'))
         self.account_toggle.setEnabled(active and not account_busy)
         for b in self.account_actions:

@@ -493,23 +493,23 @@ class Window(QMainWindow):
         elif key.startswith('只读恢复:'):
             aid=key.split(':',1)[1]
             if data.get('ok'):
-                self.account_feedback.setText(aid+'：原控制线程已恢复，正在接续原任务。')
+                self.set_account_feedback(aid,aid+'：原控制线程已恢复，正在接续原任务。')
                 self.task('接续只读恢复:'+aid,lambda aid=aid:self.recover_after_status_fault(aid))
-            else:self.account_feedback.setText(aid+'：只读恢复保留现场 · '+str(data.get('error_code')))
+            else:self.set_account_feedback(aid,aid+'：只读恢复保留现场 · '+str(data.get('error_code')))
 
         elif key.startswith('关闭账号:'):
             aid=key.split(':',1)[1]
             if data.get('ok') is not True:self.failed(key,data.get('error_code','SUBMISSION_PENDING_KEEP_BROWSER'));return
-            self.browser_live[aid]=False;self.account_feedback.setText(aid+'：已暂停队列并关闭账号浏览器。');self.update_actions()
+            self.browser_live[aid]=False;self.set_account_feedback(aid,aid+'：已暂停队列并关闭账号浏览器。');self.update_actions()
         elif key.startswith(('打开交互浏览器:','返回后台:','启动账号:')):
             if data.get('ok') is False:
                 self.failed(key,data.get('error_code','WORKER_TOOL_FAILED'));return
             if key.startswith('启动账号:') and data.get('status')=='starting':
-                self.account_feedback.setText('账号进程正在启动，浏览器尚待确认；请等待实际状态。');self.poll();return
+                self.set_account_feedback(key.split(':',1)[1],'账号进程正在启动，浏览器尚待确认；请等待实际状态。');self.poll();return
             if data.get('ok'):
                 self.browser_live[key.split(':',1)[1]]=True;self.update_actions()
                 self.banner.setText('已返回无头模式，继续课程队列' if key.startswith('返回后台:') else '已打开当前账号浏览器，课程仍自动继续；验证或考试现场按原守卫暂停。')
-                self.account_feedback.setText(key.split(':',1)[1]+'：'+('已返回后台。' if key.startswith('返回后台:') else '浏览器已打开；课程是否运行请查看当前章节与网页播放进度。'))
+                self.set_account_feedback(key.split(':',1)[1],key.split(':',1)[1]+'：'+('已返回后台。' if key.startswith('返回后台:') else '浏览器已打开；课程是否运行请查看当前章节与网页播放进度。'))
             else:
                 errors={'SUBMISSION_PENDING_KEEP_BROWSER':'当前提交结果待确认，已保留浏览器；请完成回读后再切换。',
                   'EXAM_ACTIVE_KEEP_BROWSER':'考试已经开始，已保留当前考试现场；请交卷并返回课程后再切换模式。',
@@ -561,7 +561,7 @@ class Window(QMainWindow):
         error=ERRORS.get(error,error)
         if key.startswith(('考试入口:','考试预览:','考试审阅:','考试执行:')):self.exam_info.setText(key+'：'+error)
         if key.startswith('启动队列:'):self.queue_hint.setText('启动失败：'+error)
-        if key.startswith(('启动账号:','打开交互浏览器:','返回后台:')):self.account_feedback.setText(key.split(':',1)[1]+'：'+error)
+        if key.startswith(('启动账号:','打开交互浏览器:','返回后台:')):self.set_account_feedback(key.split(':',1)[1],key.split(':',1)[1]+'：'+error)
         self.append_audit({'event':key,'error':error,'automatic_resubmit':False})
         if key=='status':self.banner.setText('连接中断 · 保留现有账号进程，请检查服务；当前列表为旧采样')
         elif key.startswith(('实时进度:','通知记录 ','clientstatus')):
@@ -589,6 +589,11 @@ class Window(QMainWindow):
     def review_selected(self):
         a=self.selected()
         if a:self.start_review(a,self.rows[a].get('attention'),self.evidence.toPlainText())
+    def set_account_feedback(self,account,message):
+        if not hasattr(self,'account_feedback_records'):self.account_feedback_records={}
+        self.account_feedback_records[account]=(message,time.monotonic())
+        if account==self.selected():self.account_feedback.setText(message)
+
     def update_actions(self):
         active=bool(self.adapter and self.selected())
         for b in self.account_actions:b.setEnabled(active)
@@ -599,6 +604,15 @@ class Window(QMainWindow):
             if b.text() in ('显示学习网页','隐藏网页，保留学习'):b.setEnabled(active and not account_busy)
         from dashboard import state_label
         row=self.rows.get(self.selected(),{});current=row.get('current') or {}
+        records=getattr(self,'account_feedback_records',{})
+        message,seen=records.get(self.selected(),('',0))
+        sample=current.get('sample') or {}
+        if (not account_busy and row.get('status')=='running' and not row.get('error_code')
+                and sample.get('paused') is False and not sample.get('ended')
+                and (current.get('sample_observed_monotonic') or 0)>seen):
+            message='当前正在学习，历史操作结果可在“运行记录”查看。'
+            records.pop(self.selected(),None)
+        self.account_feedback.setText(message or '当前账号的操作结果会显示在这里。')
         browser='已连接' if self.browser_live.get(self.selected()) else '未连接' if self.selected() in self.browser_live else '正在检查'
         next_step=('请点击“显示学习网页”，完成本人验证后会接续。' if row.get('user_action_required') else
             '正在学习：'+current.get('chapter','当前课程') if row.get('status') in ('running','awaiting_review') else
@@ -686,7 +700,7 @@ class Window(QMainWindow):
         if '审阅 '+a in self.busy:
             QMessageBox.information(self,'正在处理当前题目','请等本题提交和回读结束，再打开交互浏览器，避免中途替换答题现场。');return
         self.task('打开交互浏览器:'+a,lambda:self.adapter.route(a,'open_account_browser'))
-        self.account_feedback.setText(a+'：正在打开浏览器，等待实际结果。');self.update_actions()
+        self.set_account_feedback(a,a+'：正在打开浏览器，等待实际结果。');self.update_actions()
     def start_account(self):
         a=self.selected()
         if not a or not self.adapter:return
@@ -696,13 +710,13 @@ class Window(QMainWindow):
                 return self.adapter.route(a,'open_account_browser')
             return result
         self.task('启动账号:'+a,start)
-        self.account_feedback.setText(a+'：启动请求已发送，等待浏览器确认。');self.update_actions()
+        self.set_account_feedback(a,a+'：启动请求已发送，等待浏览器确认。');self.update_actions()
     def toggle_account(self):
         a=self.selected()
         if not a or not self.adapter:return
         if self.browser_live.get(a):
             self.task('关闭账号:'+a,lambda:self.adapter.route(a,'close_account_workspace'))
-            self.account_feedback.setText(a+'：正在核验未完成考试及提交状态，再关闭浏览器。');self.update_actions()
+            self.set_account_feedback(a,a+'：正在核验未完成考试及提交状态，再关闭浏览器。');self.update_actions()
         else:self.start_account()
     def return_background(self):
         a=self.selected()

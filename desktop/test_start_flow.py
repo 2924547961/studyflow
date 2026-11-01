@@ -20,6 +20,26 @@ def test_summary_and_dashboard_count_reviewing_accounts_consistently():
     w.exit_requested=True;w.close()
 
 
+def test_account_feedback_is_scoped_and_retires_after_fresh_playback():
+    import time
+    w=Window();w.timer.stop();w.task=Mock()
+    rows=[{'account_id':'one','status':'blocked','current':{}},
+          {'account_id':'two','status':'running','current':{}}]
+    w.done('status',{'accounts':rows});w.selected=lambda:'one'
+    w.set_account_feedback('one','one：原故障等待核验')
+    w.update_actions();assert '原故障' in w.account_feedback.text()
+    w.selected=lambda:'two';w.update_actions()
+    assert '原故障' not in w.account_feedback.text()
+    w.selected=lambda:'one';w.update_actions()
+    assert '原故障' in w.account_feedback.text()
+    w.rows['one']={**rows[0],'status':'running','current':{
+        'sample_observed_monotonic':time.monotonic()+1,
+        'sample':{'paused':False,'ended':False,'current_time':10}}}
+    w.update_actions()
+    assert '当前正在学习' in w.account_feedback.text() and 'one' not in w.account_feedback_records
+    w.exit_requested=True;w.close()
+
+
 def test_queued_poll_after_close_never_submits_to_shutdown_executor():
     w=Window();w.timer.stop();w.adapter=Mock();w.exit_requested=True;w.close()
     fn=Mock();w.task('late',fn);w.poll();_app.processEvents()

@@ -1,7 +1,7 @@
 """Native overview driven only by backend snapshots; no estimated completion."""
 from PyQt6.QtCore import Qt,QPropertyAnimation
 from PyQt6.QtWidgets import QWidget,QFrame,QLabel,QVBoxLayout,QHBoxLayout,QGridLayout,QProgressBar,QPushButton,QLayout,QSizePolicy
-from presentation import media_sync_caption,running_account_count
+from presentation import media_sync_caption,running_account_count,review_phase_caption
 
 
 def text(value='',role=''):
@@ -112,6 +112,9 @@ class Dashboard(QWidget):
             self.backend.setText('后台已连接 · 界面可独立重连')
             model=service.get('model',{});self.model.setText('当前模型\n'+model.get('provider','')+' / '+model.get('model','') if model.get('configured') else '模型尚未选择\n手动选择并应用后启用')
             jobs=[j for j in service.get('jobs',[]) if j['state']=='running']
+            review=next((j for j in service.get('jobs',[]) if j['account_id']==row.get('account_id')),None)
+            phase=review_phase_caption(review,include_failed=row.get('status')=='awaiting_review')
+            if phase:self.focus_phase.setText(phase)
             self.recovery.setText(f"后台任务 {len(jobs)} 个\n自动处理{'已开启' if service.get('auto_review') else '未开启'}")
 
     def update_media(self,current,smooth=False):

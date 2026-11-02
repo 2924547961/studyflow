@@ -93,7 +93,7 @@ def stage_owned_exam_reviews(plans: list[dict]):
         driver = _driver()
         if driver.run.state in ('saving','needs_attention'):
             raise ValueError('Resolve prior save before staging')
-        staged = {}
+        staged = {};rejected=[]
         inventory = d._state.get('owned_exam_inventory')
         questions = {q['fingerprint']:q for q in inventory['questions']} if inventory else {}
         for item in plans:
@@ -106,7 +106,12 @@ def stage_owned_exam_reviews(plans: list[dict]):
                 raise ValueError('Duplicate reviewed question')
             if inventory:
                 if fingerprint not in questions: raise ValueError('Question not in current preview')
-                driver.validate_review({**inventory, 'questions':[questions[fingerprint]]}, item['answer'], item['review'])
+                try:driver.validate_review({**inventory, 'questions':[questions[fingerprint]]}, item['answer'], item['review'])
+                except ValueError as exc:
+                    # Validation has not written to the platform. Reject only
+                    # this plan; preserve valid plans from the same model group.
+                    rejected.append({'fingerprint':fingerprint,'error_code':'EXAM_REVIEW_VALIDATION_FAILED'})
+                    continue
             staged[fingerprint] = {'answer':item['answer'], 'review':item['review']}
         driver.run.reviews.update(staged)
         if inventory:
@@ -114,7 +119,7 @@ def stage_owned_exam_reviews(plans: list[dict]):
                 plan = driver.resolve({**inventory, 'questions':[q]})
                 if plan and q.get('saved_answer') == plan['answer']:
                     driver.run.saved[q['question_id']] = {'answer':plan['answer'], 'fingerprint':q['fingerprint']}
-        return {'staged':len(staged), 'platform_write':False}
+        return {'staged':len(staged),'accepted_fingerprints':list(staged),'rejected':rejected,'platform_write':False}
     with d._operation_lock:
         return d._run(stage)
 

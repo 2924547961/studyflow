@@ -14,8 +14,6 @@ def reserve(account,recipient,previous=0,*,directory=None,now=None,interval=None
     root.mkdir(parents=True,exist_ok=True)
     path=root/(hashlib.sha256((account+'|'+recipient.lower()).encode()).hexdigest()+'.limit')
     with path.open('a+b') as stream:
-        stream.seek(0,2)
-        if not stream.tell():stream.write(b'0');stream.flush()
         stream.seek(0)
         if os.name=='nt':
             import msvcrt
@@ -24,6 +22,10 @@ def reserve(account,recipient,previous=0,*,directory=None,now=None,interval=None
             import fcntl
             fcntl.flock(stream.fileno(),fcntl.LOCK_EX)
         try:
+            # Windows permits locking beyond EOF. Initialize only after owning
+            # byte zero: another handle may already lock a newly created file.
+            stream.seek(0,2)
+            if not stream.tell():stream.write(b'0');stream.flush()
             stream.seek(1)
             raw=stream.read().decode('ascii')
             last=max(float(raw or 0),previous or 0)

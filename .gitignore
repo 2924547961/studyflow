@@ -20,3 +20,4 @@ dist/
 build/
 *.spec
 dist-single/
+*.egg-info/

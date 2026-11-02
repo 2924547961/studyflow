@@ -51,6 +51,60 @@ def test_wrong_account_cannot_inspect_scene(scene):
     scene.content.assert_not_called()
 
 
+def test_healthy_worker_with_pending_grading_can_read_back(monkeypatch,scene):
+    d._worker_failed=False
+    def confirm(*args):
+        e._pending=None
+        return {'grading_complete':True,'score':100}
+    monkeypatch.setattr(e,'confirm_course_quiz',confirm)
+    assert recover('fixture')['recovered']
+    assert not d._state['submit_attempted']
+
+
+@pytest.mark.parametrize('failure,reason',[
+    (TimeoutError('fixture'),'GRADING_READ_TRANSIENT'),
+    (ValueError('Frame was detached'),'GRADING_READ_TRANSIENT'),
+    (ValueError('grading question identity changed'),'GRADING_READBACK_REJECTED')])
+def test_readback_distinguishes_temporary_read_fault_from_identity_conflict(monkeypatch,scene,failure,reason):
+    scene.content.side_effect=failure
+    result=recover('fixture')
+    assert result['reason']==reason and not result['submission_replayed']
+    assert d._state['submit_attempted'] and d._worker_failed and e._pending
+
+
+def test_late_readback_receipt_is_retained_and_consumed_without_second_probe(monkeypatch,scene):
+    import queue
+    from chaoxing_learning_mcp import submission_readback as sr
+    jobs=Mock(unfinished_tasks=0);monkeypatch.setattr(d,'_jobs',jobs)
+    original=sr._read_probe_result
+    # Force only the first caller's timeout; the original queued read continues.
+    monkeypatch.setattr(sr,'_read_probe_result',lambda *a:{'reason':'READBACK_PENDING'})
+    assert recover('fixture')['reason']=='READBACK_PENDING'
+    monkeypatch.setattr(sr,'_read_probe_result',original)
+    assert recover('fixture')['reason']=='READBACK_PENDING'
+    def confirm(*args):
+        e._pending=None
+        return {'grading_complete':True,'score':100}
+    monkeypatch.setattr(e,'confirm_course_quiz',confirm)
+    fn,args,kwargs,done=jobs.put.call_args.args[0]
+    done.put((True,fn()))
+    assert not d._state['submit_attempted'] and not d._worker_failed
+    assert recover('fixture')['recovered']
+    assert jobs.put.call_count==1 and not d._state.get('chapter_readback_probe')
+
+
+@pytest.mark.parametrize('change',['generation','plan'])
+def test_late_receipt_cannot_unlock_another_browser_or_submission(monkeypatch,scene,change):
+    import queue
+    reply=queue.Queue();reply.put((True,{'recovered':True}))
+    d._state['chapter_readback_probe']={'account_id':'fixture','generation':None,'pending':e._pending,'done':reply}
+    if change=='generation':d._state['generation']='new-browser'
+    else:e._pending={'plan_id':'new-plan'}
+    assert recover('fixture')['reason']=='READBACK_PLAN_CHANGED'
+    assert d._state['submit_attempted'] and d._worker_failed
+    assert reply.qsize()==1
+
+
 def test_pre_submit_abort_releases_only_exact_unsubmitted_plan_once(monkeypatch,scene):
     d._worker_failed=False;d._state['submit_attempted']=False
     observed={'content_token':'same','page_url':scene.url,'questions':[{'fingerprint':'one'}]}

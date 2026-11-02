@@ -7,6 +7,7 @@ import os
 import re
 import threading
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -72,10 +73,18 @@ def _save():
         if _path:
             # Only the deliberately small public state is persisted. No page URLs,
             # tokens, cookies, credentials, full question text or signed parameters.
-            target=Path(_path);target.parent.mkdir(parents=True,exist_ok=True)
-            temporary=target.with_suffix(target.suffix+'.tmp')
-            temporary.write_text(json.dumps(_state,ensure_ascii=False,indent=2),encoding='utf-8')
-            os.replace(temporary,target)
+            try:
+                target=Path(_path);target.parent.mkdir(parents=True,exist_ok=True)
+                temporary=target.with_suffix(target.suffix+'.tmp')
+                persisted={k:v for k,v in _state.items() if k!='checkpoint_error_type'}
+                temporary.write_text(json.dumps(persisted,ensure_ascii=False,indent=2),encoding='utf-8')
+                os.replace(temporary,target)
+                _state.pop('checkpoint_error_type',None)
+            except OSError as exc:
+                # A disk/antivirus fault must not interrupt the live account.
+                # The old atomic checkpoint remains intact; retry on next save.
+                _state['checkpoint_error_type']=type(exc).__name__
+            _snapshot=copy.deepcopy(_state)
 
 
 def _watch_matches_current(direct,watch,current):
@@ -351,7 +360,7 @@ def inspect_current_task() -> dict:
         result.update(task_state='chapter_quiz_review',next_action='observe_chapter_quiz')
     elif finished:result.update(task_state='video_completed',next_action='Confirm directory and remaining cards; do not replay')
     elif sum(f.get('videos',0) for f in frames)>=1:
-        question=d._run(lambda:d._ordered_video_frame(d._require_page()).locator('.ans-videoquiz:visible').count())
+        question=d._run_readonly(lambda:d._ordered_video_frame(d._require_page()).locator('.ans-videoquiz:visible').count())
         result.update(task_state='video_question_review' if question else 'video',
                       sample=d.control_owned_video('inspect')['sample'])
         if question:result['next_action']='observe_video_question'
@@ -465,7 +474,7 @@ def _adopt_completed_video(d, current):
     if not expected or any(query.get(k)!=[v] for k,v in expected.items()):return False
     if sum(f.get('videos',0) for f in page.get('frames',[]))>1:
         frame=watch.get('frame')
-        if frame is None or not d._run(lambda:d._video_frame_finished(d._require_page(),frame)):return False
+        if frame is None or not d._run_readonly(lambda:d._video_frame_finished(d._require_page(),frame)):return False
     else:
         finished,_=_video_completion(d,page)
         if not finished:return False
@@ -567,7 +576,7 @@ def _step_impl():
         _state['course_index']+=1;_state.pop('current',None);_save();return
     chapter_id=task['task_id']
     page=d._require_page() if d._state.get('page') is not None else None
-    actual=d._run(lambda:page.url) if page else ''
+    actual=d._run_readonly(lambda:page.url) if page else ''
     query={k.lower():v for k,v in parse_qs(urlparse(actual).query).items()}
     actual_chapter=query.get('chapterid',[''])[0]
     if actual_chapter!=chapter_id:
@@ -656,6 +665,36 @@ def _step_impl():
     if media_progress:d._state.get('video_watch',{})['media_progress']=dict(media_progress)
 
 
+def _defer_unpublished_quiz_after_read_timeout():
+    """Skip a timed-out quiz only after a fresh read proves it is unpublished."""
+    from . import runtime_resilience,course_direct as d
+    if runtime_resilience.classify(TimeoutError()) != 'READ_TIMEOUT_TRANSIENT':
+        return False
+    current=_state.get('current') or {}
+    if not current.get('chapter_id') or _state.get('submit_attempted') or d.course_extension._pending:
+        return False
+    try:
+        observed=inspect_current_task()
+    except Exception:
+        return False
+    if observed.get('teacher_quiz_unavailable') is not True:
+        return False
+    entry={k:current[k] for k in ('account_id','course_id','chapter_id','chapter') if k in current}
+    entry.update(issue_id='auto_teacher_quiz_unavailable',
+                 reason='只读回读确认教师未创建完成该测验；保留待补记录并继续后续任务。',
+                 status='unfinished')
+    if any(x.get('issue_id')==entry['issue_id'] and x.get('chapter_id')==entry.get('chapter_id')
+           for x in _state.get('deferred_tasks',[])):
+        return False
+    _state.setdefault('deferred_tasks',[]).append(entry)
+    _state.pop('current',None)
+    _state.update(status='running',review_required=False,attention_owner='script',user_action_required=False)
+    from .runtime_resilience import clear
+    clear(_state)
+    _save()
+    return True
+
+
 def _handle_failure(exc):
     from . import course_direct as d
     from .runtime_resilience import backoff
@@ -673,7 +712,14 @@ def _handle_failure(exc):
                       error_code=_state['transient_recovery']['error_code'],
                       attention='Same-account read recovery; existing browser preserved')
         _save();return
-    _state['error_type']=type(exc).__name__
+    if _defer_unpublished_quiz_after_read_timeout():
+        return
+    frames=traceback.extract_tb(exc.__traceback__)[-3:]
+    diagnostics=[{'type':type(exc).__name__,
+                  'locations':[Path(frame.filename).name+':'+str(frame.lineno)+':'+frame.name for frame in frames]}]
+    _state.update(error_type=type(exc).__name__,diagnostics=diagnostics,
+                  error_tool=frames[-1].name if frames else None,
+                  phase='course_dispatch')
     text=str(exc)
     if text.startswith(('Face verification required','QR verification requires')):
         _state['error_code']='VERIFICATION_REQUIRED'

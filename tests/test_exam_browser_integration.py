@@ -73,6 +73,8 @@ def test_three_isolated_papers_fill_preview_submit_once(monkeypatch):
                         source=f'<div class="mark_info">题量：4</div><input id="start" value="{index}"><input id="answerLocked" value="0">'+block(index)+f'<a href="#" onclick="{html.escape(onclick,quote=True)}">'+('整卷预览' if index==3 else '下一题')+'</a><script>'+js+'</script>'
                     elif url.path==PREVIEW_PATH:
                         source='<div class="mark_info">题量：4</div><input id="answerLocked" value="0"><div>剩余时间：79:59</div>'+''.join(block(i) for i in range(4))+'<a href="#" onclick="if(confirm(\'确认交卷？\'))location.href=\'/result\';return false">交卷</a>'
+                        if account=='fixture2':
+                            source='<script>setTimeout(()=>{document.body.innerHTML='+json.dumps(source)+'},250)</script>'
                     elif url.path=='/result':
                         submits.append(account)
                         source='<p>题量：4</p>'+''.join(f'<div class="aiAreaContent"><h3 class="mark_name">单选题, 1 分</h3><div class="stuAnswerContent">我的答案:{saved.get(i)}</div><span class="totalScore"><i>{int(saved.get(i)==expected[i])}</i></span></div>' for i in range(4))

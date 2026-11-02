@@ -3,6 +3,33 @@ from __future__ import annotations
 import copy
 
 
+def normalize_option_fields(review,answer):
+    """Canonicalize explicit option decisions without adding evidence or certainty."""
+    raw=review.get('option_checks')
+    if isinstance(raw,list):
+        converted={}
+        for item in raw:
+            if not isinstance(item,dict):raise ValueError('Each option check requires its letter and evidence')
+            letter=item.get('letter',item.get('option'))
+            if letter in converted or not isinstance(letter,str):raise ValueError('Duplicate or missing option-check letter')
+            converted[letter]={k:v for k,v in item.items() if k not in ('letter','option')}
+        raw=converted
+    if not isinstance(raw,dict):return
+    review['option_checks']=raw
+    for letter,check in raw.items():
+        if not isinstance(check,dict):continue
+        aliases={'selected':'include','excluded':'exclude','select':'include','reject':'exclude'}
+        if check.get('verdict') in aliases:check['verdict']=aliases[check['verdict']]
+        # A top-level explicit flag applies to each option; an explicit per-option
+        # false/conflict is preserved and will fail the ordinary validator.
+        check.setdefault('addresses_exact_question',review.get('addresses_exact_question',True))
+        check.setdefault('general_truth_only',review.get('general_truth_only',False))
+    if 'selected_reasons' not in review or isinstance(review['selected_reasons'],list):
+        review['selected_reasons']={l:c.get('evidence','') for l,c in raw.items() if isinstance(c,dict) and l in answer}
+    if 'excluded_reasons' not in review or isinstance(review['excluded_reasons'],list):
+        review['excluded_reasons']={l:c.get('evidence','') for l,c in raw.items() if isinstance(c,dict) and l not in answer}
+
+
 def normalize_reviews(questions,answers,reviews):
     from .quiz import _validate_reviews,validate_answer_set,lookup_verified_answers
     if len(reviews)!=len(questions):raise ValueError('Reviews must match all observed questions')
@@ -18,6 +45,7 @@ def normalize_reviews(questions,answers,reviews):
         if review.get('model_reviewed') is not True or review.get('certain') is not True:
             raise ValueError('Explicit current-model review and certainty required')
         if q['type_hint']!='multiple_choice':continue
+        normalize_option_fields(review,answer)
         raw=review.get('option_checks')
         if isinstance(raw,list):
             converted={}

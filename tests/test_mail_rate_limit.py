@@ -29,3 +29,16 @@ def test_concurrent_notice_types_share_one_budget(tmp_path,monkeypatch):
     assert results.count('smtp_accepted')==1
     assert results.count('rate_limited_hourly')==5
     assert smtp.call_count==1
+
+
+def test_simultaneous_first_reservations_never_write_before_lock(tmp_path):
+    import threading
+    # Repeat independent first-file creation with callers released together;
+    # previously one could write byte zero while another handle held its lock.
+    for round_number in range(4):
+        start=threading.Barrier(6)
+        def reserve_once(_):
+            start.wait(timeout=5)
+            return limit.reserve('simultaneous','one@example.com',directory=tmp_path/str(round_number),now=10000)
+        with ThreadPoolExecutor(max_workers=6) as pool:results=list(pool.map(reserve_once,range(6)))
+        assert results.count(0)==1 and sum(r>0 for r in results)==5

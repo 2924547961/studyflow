@@ -27,6 +27,15 @@ def test_browser_status_does_not_wait_for_an_account_writer(monkeypatch):
     assert independent and result[0]['running']
 
 
+@pytest.mark.parametrize('incident,expected', [('new-incident','new-incident'),(None,'legacy-time')])
+def test_browser_status_exposes_current_incident_for_recovery_deduplication(monkeypatch,incident,expected):
+    monkeypatch.setattr(direct,'_state',{'worker_failure_id':incident})
+    monkeypatch.setattr(direct,'_LOG',[{'outcome':'failed','error':'outcome unknown','ts':'legacy-time'}])
+    monkeypatch.setattr(direct,'_worker_failed',True)
+    monkeypatch.setattr(direct,'_run',Mock(side_effect=AssertionError('cached status only')))
+    assert direct.browser_status()['worker_failure_id']==expected
+
+
 @pytest.fixture(autouse=True)
 def isolated_state(monkeypatch):
     monkeypatch.setattr(direct, "_state", {
@@ -204,8 +213,71 @@ def test_closed_page_is_not_reported_as_running():
     browser.is_connected.return_value = True
     direct._state.update(page=page, browser=browser)
     assert direct.browser_status()["running"] is False
-    with pytest.raises(RuntimeError, match="closed"):
-        direct._require_page()
+
+
+def test_open_chapter_moves_from_default_tasks_tab_to_chapters(monkeypatch):
+    class Locator:
+        def __init__(self,page,kind):self.page=page;self.kind=kind
+        def count(self):
+            if self.kind=='chapter-tab':return 1
+            return int(self.page.in_chapters)
+        def is_visible(self):return True
+        def click(self,**kwargs):
+            if self.kind=='chapter-tab':self.page.in_chapters=True
+            else:self.page.selected=True
+    class Frame:
+        def __init__(self,page):self.page=page
+        def is_detached(self):return False
+        def locator(self,selector):
+            assert selector=='#cur42'
+            return Locator(self.page,'chapter')
+    class Page:
+        def __init__(self):self.in_chapters=False;self.selected=False;self.frames=[Frame(self)]
+        def locator(self,selector):
+            assert selector=='li[dataname="zj"] a'
+            return Locator(self,'chapter-tab')
+        def wait_for_timeout(self,ms):pass
+    page=Page()
+    monkeypatch.setattr(direct,'_require_page',lambda:page)
+    monkeypatch.setattr(direct,'_run',lambda fn:fn())
+    monkeypatch.setattr(direct,'_check_gates',lambda p:None)
+    monkeypatch.setattr(direct,'_acknowledge_course_notice',lambda p:False)
+    monkeypatch.setattr(direct,'inspect_owned_page',lambda:{'chapter_id':'42','cards':[{'text':'视频'}]})
+    observed=direct.open_course_chapter.__wrapped__('42')
+    assert page.in_chapters and page.selected
+    assert observed['chapter_id']=='42'
+
+
+def test_open_chapter_accepts_current_skin_li_when_the_link_is_absent(monkeypatch):
+    class Locator:
+        def __init__(self,page,kind):self.page=page;self.kind=kind
+        def count(self):
+            if self.kind=='link':return 0
+            if self.kind=='tab':return 1
+            return int(self.page.in_chapters)
+        def is_visible(self):return True
+        def click(self,**kwargs):
+            if self.kind=='tab':self.page.in_chapters=True
+            else:self.page.selected=True
+    class Frame:
+        def __init__(self,page):self.page=page
+        def is_detached(self):return False
+        def locator(self,selector):
+            assert selector=='#cur42'
+            return Locator(self.page,'chapter')
+    class Page:
+        def __init__(self):self.in_chapters=False;self.selected=False;self.frames=[Frame(self)]
+        def locator(self,selector):
+            return Locator(self,'link' if selector.endswith(' a') else 'tab')
+        def wait_for_timeout(self,ms):pass
+    page=Page()
+    monkeypatch.setattr(direct,'_require_page',lambda:page)
+    monkeypatch.setattr(direct,'_run',lambda fn:fn())
+    monkeypatch.setattr(direct,'_check_gates',lambda p:None)
+    monkeypatch.setattr(direct,'_acknowledge_course_notice',lambda p:False)
+    monkeypatch.setattr(direct,'inspect_owned_page',lambda:{'chapter_id':'42'})
+    direct.open_course_chapter.__wrapped__('42')
+    assert page.in_chapters and page.selected
 
 
 def test_worker_timeout_latches_and_prevents_replay(monkeypatch):
@@ -486,11 +558,26 @@ def test_account_bind_reuses_bootstrap_browser(monkeypatch):
     monkeypatch.setattr(direct,'_run',lambda fn,*args,**kwargs:fn(*args,**kwargs))
     monkeypatch.setattr(direct,'_account',lambda key:object())
     monkeypatch.setattr(direct,'_cookies',lambda account:[])
+    monkeypatch.setattr(direct,'_verify_seeded_browser_session',lambda page:{'browser_authenticated':True})
     launch=Mock();monkeypatch.setattr(direct,'_launch',launch)
     result=direct.start_course_browser('account-one')
     assert result['reused'] and result['account_bound'] and result['generation']=='bootstrap'
     assert direct._state['account_id']=='account-one'
     launch.assert_not_called()
+
+
+def test_seeded_browser_session_rejects_passport_redirect():
+    page=Mock()
+    page.url='https://passport2.chaoxing.com/login'
+    with pytest.raises(ValueError,match='BROWSER_AUTHENTICATION_EXPIRED'):
+        direct._verify_seeded_browser_session(page)
+    page.goto.assert_called_once_with('https://i.chaoxing.com/',wait_until='domcontentloaded',timeout=20000)
+
+
+def test_seeded_browser_session_accepts_chaoxing_landing():
+    page=Mock()
+    page.url='https://i.chaoxing.com/base'
+    assert direct._verify_seeded_browser_session(page)=={'browser_authenticated':True,'browser_host':'i.chaoxing.com'}
 
 
 def test_switch_reuses_browser_and_closes_old_context_first(monkeypatch):

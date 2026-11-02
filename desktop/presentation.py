@@ -38,6 +38,26 @@ def running_account_count(rows):
     return sum(row.get('status') in ('running','awaiting_review') for row in rows)
 
 
+def review_phase_caption(job,include_failed=False):
+    if not job or job.get('operation')!='review':return ''
+    if include_failed and job.get('state')=='failed':
+        retry=job.get('automatic_retry') or {}
+        if retry.get('state')=='scheduled':
+            import time
+            remaining=max(0,int(retry['due_at']-time.time()))
+            return f"服务暂时未响应 · {remaining} 秒后自动重试（{retry['attempts']+1}/{retry['limit']}）"
+        if retry.get('state')=='exhausted':return '服务持续异常 · 自动重试已用尽 · 仅当前账号等待，详见运行记录'
+        if job.get('error')=='NEEDS_EVIDENCE_OR_REVIEW':return '待补充题目依据 · 尚未提交 · 详见“题目处理”'
+        return '处理未完成 · '+str((job.get('progress') or {}).get('phase','读取题目'))+' · '+str(job.get('error','待核验'))
+    if job.get('state')!='running':return ''
+    import time
+    progress=job.get('progress') or {}
+    elapsed=max(0,int(time.time()-progress.get('phase_started_at',job.get('started_at',time.time()))))
+    text=f"{progress.get('phase','准备读取题目')} · 本阶段 {elapsed} 秒"
+    if progress.get('answers'):text+=' · 作答选项：'+' / '.join(progress['answers'])
+    return text
+
+
 def media_caption(sample,progress=None):
     progress=progress or {};count=progress.get('required_video_count',0)
     prefix=''

@@ -7,6 +7,43 @@ from chaoxing_learning_mcp.application_core import ActionError
 
 CONFIG={'endpoint':'https://example.com/v1','model':'manually-selected','key':'fixture-secret'}
 
+
+@pytest.mark.parametrize('external,busy',[(False,False),(True,False),(False,True)])
+def test_hot_reload_rebinds_only_idle_services_owned_event_callback(monkeypatch,external,busy):
+    from chaoxing_learning_mcp import application_service,course_direct,desktop_gateway,parallel_runner
+    service=ApplicationService();old=service.adapter.on_event
+    if external:service.adapter.on_event=old=Mock()
+    service.reviews.attempted.add(('a','already-submitted'))
+    if busy:service.active['a']='active-job'
+    monkeypatch.setattr(application_service,'_service',service)
+    monkeypatch.setattr(parallel_runner,'_sessions',{'existing':object()})
+    monkeypatch.setattr(desktop_gateway,'install_handler',Mock())
+    monkeypatch.setattr('importlib.reload',lambda module:module)
+    upgraded=Mock()
+    def new_event(self,value):upgraded(value)
+    monkeypatch.setattr(ApplicationService,'event',new_event)
+    result=course_direct.refresh_desktop_implementation()
+    assert result['application_service_updated'] is (not busy)
+    assert service.reviews.attempted=={('a','already-submitted')}
+    if external or busy:assert service.adapter.on_event is old
+    else:
+        service.adapter.on_event({'event':'new'})
+        upgraded.assert_called_once_with({'event':'new'})
+
+
+def test_review_phase_records_stage_time_without_touching_another_account():
+    service=ApplicationService(Mock())
+    review={'account_id':'a','operation':'review','state':'running','progress':{}}
+    exam={'account_id':'b','operation':'exam_fill','state':'running','progress':{'saved_count':2}}
+    service.jobs={'a-job':review,'b-job':exam};service.active={'a':'a-job','b':'b-job'}
+    with patch('chaoxing_learning_mcp.application_service.time.time',side_effect=[100,103,105]):
+        service.event({'account':'a','event':'模型审阅开始'})
+        service.event({'account':'a','event':'模型审阅完成','proposal':{'answers':['A'],'reviews':[{'basis':'actual reason'}]}})
+        service.event({'account':'b','event':'模型审阅开始'})
+    assert review['progress']['phase_timings']==[{'phase':'模型判断','seconds':3}]
+    assert review['progress']['answers']==['A'] and review['progress']['basis']==['actual reason']
+    assert exam['progress']=={'saved_count':2} and service.events[0]['at']==100
+
 def finished(service, job):
     deadline=time.monotonic()+3
     while time.monotonic()<deadline:
@@ -61,7 +98,7 @@ def test_deferred_recovery_does_not_restart_stopped_account_or_failed_job():
 
 @pytest.mark.parametrize('reason,deferred',[
     ('ORIGINAL_OWNER_NOT_IDLE',True),('READBACK_PENDING',True),('GRADING_PENDING',True),
-    ('GRADING_IDENTITY_MISMATCH',False)])
+    ('GRADING_READ_TRANSIENT',True),('GRADING_IDENTITY_MISMATCH',False)])
 def test_late_submission_schedules_readback_only_after_current_check_finishes(reason,deferred):
     from chaoxing_learning_mcp.application_core import RecoveryCoordinator
     adapter=Mock();adapter.route.side_effect=lambda a,t,**kw:(
@@ -135,6 +172,23 @@ def test_supervisor_uses_cached_state_and_never_calls_model_for_playing_accounts
     assert service.start.call_count==1
     service.auto_review=False;row['current']['chapter_id']='2'
     service.tick({'accounts':[row]});assert service.start.call_count==1
+
+
+@pytest.mark.parametrize('error_code',['WORKER_TOOL_FAILED','WORKER_TASK_FAILED','TASK_START_FAILED',
+    'BROWSER_ACTION_TIMEOUT','BROWSER_CLOSED'])
+def test_blocked_worker_faults_enter_bounded_read_only_recovery(error_code):
+    service=ApplicationService(Mock());service.start=Mock()
+    service.tick({'accounts':[{'account_id':'a','status':'awaiting_review','error_code':error_code,'current':{}}]})
+    service.start.assert_called_once_with('a','recover')
+
+
+def test_external_attention_recovery_rechecks_with_existing_backoff():
+    service=ApplicationService(Mock());service.start=Mock()
+    previous={'account_id':'a','operation':'recover','state':'completed','finished_at':time.time()-60,
+              'result':{'recovery_kind':'external_attention'}}
+    service.jobs['previous']=previous
+    service.tick({'accounts':[{'account_id':'a','status':'blocked','current':{}}]})
+    service.start.assert_called_once_with('a','recover',None)
 
 
 def test_confirmed_review_is_not_replayed_from_stale_cached_attention():

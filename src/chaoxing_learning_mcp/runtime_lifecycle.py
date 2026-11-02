@@ -7,9 +7,9 @@ import threading
 from pathlib import Path
 from datetime import datetime, timezone
 
-_lock=threading.RLock()
-_started=time.monotonic()
-_events=[]
+_lock=globals().get('_lock',threading.RLock())
+_started=globals().get('_started',time.monotonic())
+_events=globals().get('_events',[])
 
 def record(event,error_type=None):
     row=dict(timestamp=datetime.now(timezone.utc).isoformat(),pid=os.getpid(),
@@ -30,14 +30,20 @@ def record(event,error_type=None):
 def runtime_health():
     from . import course_direct as d,batch_runner as b,parallel_runner as p
     w=d._state.get('video_watch',{})
+    page,browser=d._state.get('page'),d._state.get('browser')
+    closed=bool(page is not None and browser is not None and
+                (page.is_closed() is True or browser.is_connected() is False))
     heartbeat=w.get('worker_heartbeat')
     with _lock:events=list(_events)
     return dict(server_pid=os.getpid(),parent_pid=os.getppid(),uptime_seconds=round(time.monotonic()-_started),
         browser_generation=d._state.get('generation'),browser_worker_failed=d._worker_failed,
+        browser_closed=closed,
         video_watch_status=w.get('status'),
         worker_heartbeat_age=round(max(0,time.monotonic()-heartbeat),1) if heartbeat is not None else None,
         local_queue_status=b._snapshot.get('status'),
         pending_review=bool(d.course_extension._pending),unknown_submission=bool(d._state.get('submit_attempted')),
+        submission_readback_pending=bool(d._state.get('chapter_readback_probe')),
+        last_operation_fault=d._state.get('last_operation_fault'),
         supervisor_alive=bool(p._loop is not None and p._loop.is_running()),events=events,
         browser_polled=False,credentials_read=False)
 

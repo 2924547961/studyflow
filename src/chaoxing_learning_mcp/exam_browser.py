@@ -305,8 +305,7 @@ class SequentialExam:
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
                 self.page.wait_for_timeout(100)
-                if last and urlparse(self.page.url).path == PREVIEW_PATH:
-                    break
+                arrived = last and urlparse(self.page.url).path == PREVIEW_PATH
                 if not last:
                     try:
                         ids = self.page.locator('.singleQuesId[data]').evaluate_all('(nodes) => nodes.map(n => n.getAttribute("data"))')
@@ -314,11 +313,21 @@ class SequentialExam:
                         if 'Execution context was destroyed' in str(exc):
                             continue  # Read-only retry while normal Next navigation replaces the document.
                         raise
-                    if len(ids) == 1 and ids[0] != q['question_id']:
-                        break
+                    arrived = len(ids) == 1 and ids[0] != q['question_id']
+                if not arrived:
+                    continue
+                try:
+                    after = self.read(preview=last)
+                except ValueError as exc:
+                    if str(exc) in ('incomplete, unsupported or encoded question data',
+                                    'expected exactly one question in editable view'):
+                        continue  # URL changes before all question data is rendered.
+                    raise
+                if last and not after.get('all_questions_loaded'):
+                    continue
+                break
             else:
                 raise RuntimeError('save/navigation not confirmed; do not automatically retry')
-            after = self.read(preview=last)
             if not last:
                 before_start, after_start = snap['state'].get('start'), after['state'].get('start')
                 if before_start is None or not str(before_start).isdigit() or not str(after_start).isdigit() or int(after_start) != int(before_start) + 1:

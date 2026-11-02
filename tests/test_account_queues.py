@@ -41,6 +41,96 @@ def test_status_timeout_can_recover_after_following_guard_errors():
     assert not owner._worker_failed
 
 
+@pytest.mark.parametrize('busy,unknown,expected',[(0,False,True),(1,False,False),(0,True,False)])
+def test_consumed_legacy_read_probe_cannot_lock_idle_owner_forever(busy,unknown,expected):
+    import queue
+    jobs=Mock(unfinished_tasks=busy)
+    jobs.put.side_effect=lambda job:job[3].put((True,job[0]()))
+    owner=SimpleNamespace(_state={'page':SimpleNamespace(is_closed=lambda:False),
+        'read_worker_probe_attempted':True,'read_worker_probe_failure_ts':'old','read_worker_probe_done':queue.Queue(),
+        'video_question_attempts':{'q':{'correct':None}} if unknown else {}},
+        course_extension=SimpleNamespace(_pending=None),_worker_failed=True,
+        _worker=SimpleNamespace(is_alive=lambda:True,ident=None),_jobs=jobs,
+        _LOG=[{'stage':'inspect_owned_page','outcome':'failed','ts':'old','error':'outcome unknown'}])
+    result=b._recover_read_worker(owner)
+    assert result['ok'] is expected
+    assert jobs.put.call_count==int(expected)
+
+
+def test_new_failure_id_does_not_reuse_previously_consumed_read_probe():
+    import queue
+    jobs=Mock(unfinished_tasks=0);jobs.put.side_effect=lambda job:job[3].put((True,job[0]()))
+    owner=SimpleNamespace(_state={'page':SimpleNamespace(is_closed=lambda:False),'worker_failure_id':'new',
+        'read_worker_probe_attempted':True,'read_worker_probe_failure_ts':'old','read_worker_probe_done':queue.Queue()},
+        course_extension=SimpleNamespace(_pending=None),_worker_failed=True,
+        _worker=SimpleNamespace(is_alive=lambda:True),_jobs=jobs,
+        _LOG=[{'stage':'inspect_owned_page','outcome':'failed','ts':'old','error':'outcome unknown'}])
+    assert b._recover_read_worker(owner)['ok']
+    assert owner._state['read_worker_probe_failure_ts']=='new'
+
+
+@pytest.mark.parametrize('change,accepted',[
+    ({},True),({'outer':'select_course_card'},True),({'outer':'submit_click'},False),
+    ({'time':'later'},False),({'error':'different outcome unknown'},False),
+    ({'interleaved':True},False),({'pending':True},False)])
+def test_nested_legacy_inspection_error_is_not_misclassified_as_navigation_write(change,accepted):
+    jobs=Mock();jobs.put.side_effect=lambda job:job[3].put((True,job[0]()))
+    log=[{'stage':'inspect_owned_page','ts':'same','outcome':'failed','error':'outcome unknown'}]
+    if change.get('interleaved'):log.append({'stage':'submit_click','outcome':'ok'})
+    log.append({'stage':change.get('outer','open_course_chapter'),'ts':change.get('time','same'),
+                'outcome':'failed','error':change.get('error','outcome unknown')})
+    owner=SimpleNamespace(_state={'page':SimpleNamespace(is_closed=lambda:False),
+        'submit_attempted':change.get('pending',False)},course_extension=SimpleNamespace(_pending=None),
+        _worker_failed=True,_worker=SimpleNamespace(is_alive=lambda:True),_jobs=jobs,_LOG=log)
+    assert b._recover_read_worker(owner)['ok'] is accepted
+    assert jobs.put.call_count==int(accepted)
+
+
+def test_nested_timeout_keeps_innermost_source_and_correlation(monkeypatch):
+    records=[];monkeypatch.setattr(d,'_log',lambda stage,outcome,**detail:records.append({'stage':stage,**detail}))
+    error=RuntimeError('outcome unknown');error.studyflow_fault_id='specific-timeout'
+    @d._serialized
+    def inspect_owned_page():raise error
+    @d._serialized
+    def open_course_chapter():return inspect_owned_page()
+    with pytest.raises(RuntimeError):open_course_chapter()
+    assert [r['stage'] for r in records]==['inspect_owned_page','open_course_chapter']
+    assert all(r['fault_id']=='specific-timeout' and r['origin_stage']=='inspect_owned_page' for r in records)
+
+
+@pytest.mark.parametrize('change,accepted',[
+    ({},True),({'unreported':True},False),({'unknown_video':True},False),
+    ({'same_chapter':True},False),({'other_class':True},False),({'different_page':True},False),
+    ({'pending':True},False),({'no_grade':True},False),({'exam':True},False)])
+def test_old_confirmed_chapter_failure_does_not_mask_current_read_fault(change,accepted):
+    jobs=Mock();jobs.put.side_effect=lambda job:job[3].put((True,job[0]()))
+    url='https://fixture/lesson?courseId=c&clazzid='+('other' if change.get('other_class') else 'k')+'&chapterId='+('1' if change.get('same_chapter') else '2')
+    owner=SimpleNamespace(_state={'account_id':'a','submit_attempted':change.get('pending',False),
+        'owned_exam_run':object() if change.get('exam') else None,
+        'page':SimpleNamespace(url='https://fixture/other' if change.get('different_page') else url,is_closed=lambda:False),
+        'frame':'https://fixture/quiz?courseId=c&classId=k&knowledgeId=1&workId=w',
+        'video_watch':{'page_url':url},'video_question_attempts':{'q':{'correct':None}} if change.get('unknown_video') else {}},
+        _reported_quizzes=set() if change.get('unreported') else {('a',('c','k','1','w'))},
+        course_extension=SimpleNamespace(_pending=None),_worker_failed=True,
+        _worker=SimpleNamespace(is_alive=lambda:True),_jobs=jobs,
+        _LOG=[{'stage':'submit_chapter_quiz','ts':'old','outcome':'failed','error':'outcome unknown'},
+              {'stage':'grading_wait','outcome':'timeout' if change.get('no_grade') else 'ok'},
+              {'stage':'inspect_owned_page','ts':'new','outcome':'failed','error':'restart this MCP'}])
+    result=b._recover_read_worker(owner)
+    assert result['ok'] is accepted and owner._worker_failed is (not accepted)
+    assert jobs.put.call_count==int(accepted)
+
+
+def test_queue_read_timeout_records_origin_and_guard_error_does_not(monkeypatch):
+    monkeypatch.setattr(d,'_log',Mock())
+    monkeypatch.setattr(d,'_run',Mock(side_effect=RuntimeError('Browser worker timed out; outcome unknown')))
+    with pytest.raises(RuntimeError):d._run_readonly(lambda:None)
+    d._log.assert_called_once_with('read_only_inspection','failed',error='Browser worker timed out; outcome unknown')
+    d._log.reset_mock();d._run.side_effect=RuntimeError('restart this MCP before further actions')
+    with pytest.raises(RuntimeError):d._run_readonly(lambda:None)
+    d._log.assert_not_called()
+
+
 @pytest.mark.parametrize('change,accepted',[
     ({},True),({'status':'ended_needs_task_confirmation'},True),
     ({'status':'question_requires_review'},False),({'attention':'chapter_quiz'},False),
@@ -345,6 +435,48 @@ def test_order_uses_first_explicit_incomplete_task():
     tasks_list=[{'task_id':'one','status':'incomplete','remaining_tasks':2},
                 {'task_id':'two','status':'incomplete','remaining_tasks':1}]
     assert b.next_incomplete({'directory':{'directory_progress':{'total':3,'remaining':3}},'tasks':tasks_list})['task_id']=='one'
+
+
+def test_course_queue_step_opens_first_chapter_and_starts_its_video_task(monkeypatch):
+    from chaoxing_learning_mcp import hourly_reports
+    course={'name':'习近平新时代中国特色社会主义思想概论26-27','course_id':'courseid:1:clazzid:2',
+            'url':'https://mooc1.chaoxing.com/mycourse/studentcourse?courseid=1&clazzid=2'}
+    account=SimpleNamespace(username='fixture',list_courses=Mock(return_value={'courses':[course]}))
+    monkeypatch.setattr(tasks,'_accounts',{'fixture':account})
+    monkeypatch.setattr(b,'_plan',[{'account_id':'fixture','requested':['习近平新时代中国特色社会主义思想概论26-27'],'courses':None}])
+    public_course={'name':'习近平新时代中国特色社会主义思想概论26-27','status':'queued'}
+    monkeypatch.setattr(b,'_state',{'status':'running','account_index':0,'course_index':0,
+        'accounts':[{'account_id':'fixture','status':'queued','courses':[public_course]}]})
+    page=SimpleNamespace(url='https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu?courseid=1&clazzid=2',frames=[])
+    monkeypatch.setattr(d,'_state',{'account_id':'fixture','page':page,'submit_attempted':False,
+        'video_watch':{},'video_question_attempts':{}})
+    monkeypatch.setattr(d,'_require_page',lambda:page)
+    monkeypatch.setattr(d,'_run_readonly',lambda fn:fn())
+    inventory={'directory':{'directory_progress':{'total':1,'remaining':1}},
+               'tasks':[{'task_id':'42','title':'第一章','status':'incomplete','remaining_tasks':1}]}
+    monkeypatch.setattr(tasks,'inspect_course',lambda *_:inventory)
+    selected={'cards':[{'selector':'#dct1','text':'课程视频'}],'frames':[]}
+    loaded={'cards':[{'selector':'#dct1','text':'课程视频'}],
+            'frames':[{'videos':1,'task_markers':[{'class_name':'videoContainer'}]}]}
+    events=[]
+    monkeypatch.setattr(d,'goto_course_page',lambda url:events.append(('course',url)))
+    monkeypatch.setattr(d,'open_course_chapter',lambda chapter:events.append(('chapter',chapter)) or selected)
+    monkeypatch.setattr(d,'inspect_owned_page',lambda: selected)
+    monkeypatch.setattr(d,'select_course_card',lambda selector:events.append(('card',selector)) or loaded)
+    playback=Mock(return_value={'status':'playing','sample':{'paused':False,'ended':False,'playback_rate':1.25}})
+    monkeypatch.setattr(d,'control_owned_video',playback)
+    monkeypatch.setattr(b,'_wake',SimpleNamespace(wait=lambda *_:False,set=Mock(),clear=Mock()))
+    monkeypatch.setattr(b,'_save',Mock())
+    begin=Mock();monkeypatch.setattr(hourly_reports,'begin',begin)
+
+    b._step_impl()
+
+    assert events==[('chapter','42'),('card','#dct1')]
+    playback.assert_called_once_with(action='play',rate=1.25,bring_to_front=False)
+    begin.assert_called_once_with('fixture')
+    assert b._state['current']['chapter_id']=='42'
+    assert b._state['current']['report_started'] is True
+    assert b._state['accounts'][0]['courses'][0]['status']=='running'
 
 
 def test_deferred_task_keeps_platform_progress_and_selects_next():

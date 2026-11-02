@@ -78,6 +78,33 @@ def test_batch_transient_does_not_stop_queue_or_browser(monkeypatch):
     assert b._state['error_code']=='TRANSIENT_RECOVERY_EXHAUSTED'
 
 
+def test_read_timeout_skips_only_confirmed_unpublished_quiz(monkeypatch):
+    state={'status':'running','current':{'account_id':'a','course_id':'c',
+        'chapter_id':'k','chapter':'chapter'}}
+    monkeypatch.setattr(b,'_state',state);monkeypatch.setattr(b,'_save',lambda:None)
+    monkeypatch.setattr(d,'_state',{'submit_attempted':False})
+    monkeypatch.setattr(d.course_extension,'_pending',None)
+    monkeypatch.setattr(b,'inspect_current_task',lambda:{'teacher_quiz_unavailable':True})
+    error=TimeoutError('read timed out')
+    for _ in range(3):
+        b._handle_failure(error)
+    b._handle_failure(error)
+    assert state['status']=='running' and 'current' not in state
+    assert state['deferred_tasks'][0]['issue_id']=='auto_teacher_quiz_unavailable'
+
+
+def test_read_timeout_without_unpublished_marker_stays_blocked(monkeypatch):
+    state={'status':'running','current':{'account_id':'a','course_id':'c','chapter_id':'k'}}
+    monkeypatch.setattr(b,'_state',state);monkeypatch.setattr(b,'_save',lambda:None)
+    monkeypatch.setattr(d,'_state',{'submit_attempted':False})
+    monkeypatch.setattr(d.course_extension,'_pending',None)
+    monkeypatch.setattr(b,'inspect_current_task',lambda:{'teacher_quiz_unavailable':False})
+    error=TimeoutError('read timed out')
+    for _ in range(4):
+        b._handle_failure(error)
+    assert state['status']=='blocked' and state['error_code']=='TRANSIENT_RECOVERY_EXHAUSTED'
+
+
 def test_quiz_attention_owned_by_model_not_user(monkeypatch):
     monkeypatch.setattr(b,'_state',dict(status='running'))
     monkeypatch.setattr(b,'_save',lambda:None)

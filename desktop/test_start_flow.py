@@ -7,6 +7,32 @@ from app import Window
 
 _app=QApplication.instance() or QApplication([])
 
+
+def test_exam_entry_continues_after_workspace_start_and_ignores_old_course(monkeypatch):
+    w=Window();w.timer.stop();w.adapter=Mock();w.task=Mock();w.selected=lambda:'a'
+    w.exam_requested_course['a']='chosen'
+    callbacks=[]
+    monkeypatch.setattr('app.QTimer.singleShot',lambda ms,fn:callbacks.append(fn))
+    w.done('考试入口:a',{'ok':False,'error_code':'ACCOUNT_STARTING','course':'chosen'})
+    assert '自动打开' in w.exam_info.text()
+    callbacks.pop()();key,fn=w.task.call_args.args;fn()
+    w.adapter.route.assert_called_once_with('a','open_course_exam',course_name='chosen')
+    w.task.reset_mock();w.exam_requested_course['a']='new'
+    w.continue_exam_entry('a','chosen');w.task.assert_not_called()
+    w.exit_requested=True;w.close()
+
+
+def test_failed_external_exam_job_does_not_keep_showing_running_phase():
+    w=Window();w.timer.stop();w.application=Mock();w.task=Mock();w.selected=lambda:'a'
+    job={'id':'j','account_id':'a','operation':'exam_fill','state':'failed','error':'WORKER_TOOL_FAILED',
+         'progress':{'account_id':'a','run_id':'r','phase':'分组检索与求解','state':'ready','total':85,'saved_count':1}}
+    w.done('后台服务',{'jobs':[job],'events':[],'model':{}})
+    assert '处理失败' in w.exam_info.text()
+    w.exam_progress({'account_id':'a','run_id':'r','state':'ready','total':85,'saved_count':1})
+    assert '处理失败' in w.exam_info.text() and '分组检索与求解' not in w.exam_info.text()
+    assert w.exam_progress_bar.value()==1
+    w.exit_requested=True;w.close()
+
 def test_summary_and_dashboard_count_reviewing_accounts_consistently():
     w=Window();w.timer.stop();w.task=Mock()
     rows=[{'account_id':'playing','status':'running','current':{}},
@@ -38,6 +64,36 @@ def test_account_feedback_is_scoped_and_retires_after_fresh_playback():
     w.update_actions()
     assert '当前正在学习' in w.account_feedback.text() and 'one' not in w.account_feedback_records
     w.exit_requested=True;w.close()
+
+
+def test_review_phase_is_visible_in_account_and_overview_without_mutating_exam_progress():
+    import time
+    w=Window();w.timer.stop();w.adapter=Mock();w.task=Mock();w.application=Mock();w.exam_progress=Mock()
+    row={'account_id':'a','status':'awaiting_review','current':{'chapter':'Current chapter'}}
+    w.done('status',{'accounts':[row]})
+    job={'id':'review','account_id':'a','state':'running','operation':'review',
+         'started_at':time.time()-10,'progress':{'account_id':'a','phase':'提交并回读平台结果',
+         'phase_started_at':time.time()-3,'answers':['A']}}
+    w.done('后台服务',{'jobs':[job],'events':[],'model':{}})
+    assert '提交并回读' in w.account_summary.text() and '作答选项：A' in w.dashboard.focus_phase.text()
+    w.exam_progress.assert_not_called()
+    job.update(state='failed',error='NEEDS_EVIDENCE_OR_REVIEW')
+    w.done('后台服务',{'jobs':[job],'events':[],'model':{}})
+    assert '待补充题目依据' in w.account_summary.text() and '尚未提交' in w.dashboard.focus_phase.text()
+    w.done('status',{'accounts':[{**row,'status':'running'}]})
+    assert '待补充题目依据' not in w.account_summary.text() and '尚未提交' not in w.dashboard.focus_phase.text()
+    w.exit_requested=True;w.close()
+
+
+def test_retry_caption_explains_wait_and_exhaustion_without_hiding_failure():
+    import time
+    from presentation import review_phase_caption
+    job={'operation':'review','state':'failed','error':'MODEL_TRANSPORT_RETRYABLE',
+         'automatic_retry':{'state':'scheduled','due_at':time.time()+15,'attempts':1,'limit':3}}
+    assert '自动重试（2/3）' in review_phase_caption(job,True)
+    assert review_phase_caption(job,False)==''
+    job['automatic_retry']['state']='exhausted'
+    assert '仅当前账号等待' in review_phase_caption(job,True)
 
 
 def test_queued_poll_after_close_never_submits_to_shutdown_executor():
@@ -84,6 +140,51 @@ def test_course_selection_requires_explicit_start_and_routes_only_selected_cours
     w.exit_requested=True;w.close()
 
 
+def test_starting_queue_inherits_existing_supervisor_mode_and_rate():
+    w=Window();w.timer.stop();w.adapter=Mock();w.selected=lambda:'fixture'
+    w.adapter.snapshot.return_value={'supervisor_available':True,'browser_mode':'minimized','requested_rate':1.25}
+    w.adapter.call.return_value={'ok':True,'results':[{'account_id':'fixture','status':'starting'}]}
+    w.queue_drafts['fixture']=['课程甲']
+    w.queue_mode.setCurrentIndex(w.queue_mode.findData('headless'))
+    w.queue_rate.setCurrentIndex(w.queue_rate.findData(1))
+    w.task=lambda key,fn:fn()
+    w.start_queue()
+    args=w.adapter.call.call_args.args[1]
+    assert args['browser_mode']=='minimized' and args['rate']==1.25
+    w.exit_requested=True;w.close()
+
+
+def test_apply_browser_mode_switches_headless_and_headed_without_relaunching_queue():
+    w=Window();w.timer.stop();w.adapter=Mock();w.selected=lambda:'fixture'
+    w.adapter.route.side_effect=[
+        {'running':True,'browser_mode':'headless'},
+        {'ok':True,'browser_replaced':True,'course_automation_continues':True},
+        {'bounds':{'windowState':'minimized'}},
+    ]
+    w.queue_mode.setCurrentIndex(w.queue_mode.findData('minimized'))
+    w.task=lambda key,fn:fn()
+    w.apply_browser_mode()
+    assert [call.args[1] for call in w.adapter.route.call_args_list]==[
+        'browser_status','open_account_browser','minimize_owned_window']
+    assert w.account_modes['fixture']=='minimized'
+    w.exit_requested=True;w.close()
+
+
+def test_apply_headless_mode_uses_live_browser_handoff():
+    w=Window();w.timer.stop();w.adapter=Mock();w.selected=lambda:'fixture'
+    w.adapter.route.side_effect=[
+        {'running':True,'browser_mode':'minimized'},
+        {'ok':True,'browser_replaced':True,'course_automation_continues':True},
+    ]
+    w.queue_mode.setCurrentIndex(w.queue_mode.findData('headless'))
+    w.task=lambda key,fn:fn()
+    w.apply_browser_mode()
+    assert [call.args[1] for call in w.adapter.route.call_args_list]==[
+        'browser_status','return_account_to_background']
+    assert w.account_modes['fixture']=='headless'
+    w.exit_requested=True;w.close()
+
+
 def test_failures_remain_visible_and_duplicate_browser_clicks_are_disabled():
     w=Window();w.timer.stop();w.adapter=Mock();w.selected=lambda:'fixture'
     w.poll=Mock()
@@ -97,7 +198,7 @@ def test_failures_remain_visible_and_duplicate_browser_clicks_are_disabled():
     protected=[w.account_toggle,*[b for b in w.account_actions if b.text()=='显示学习网页']]
     assert len(protected)==2 and all(not b.isEnabled() for b in protected)
     w.busy.clear();w.done('启动账号:fixture',{'ok':True,'browser_replaced':False})
-    assert '浏览器已打开' in w.account_feedback.text()
+    assert '已切换为有界面模式' in w.account_feedback.text()
     w.done('启动队列:fixture',{'ok':True,'results':[{'account_id':'fixture','status':'reused','worker_status':'stopped'}]})
     assert '已暂停' in w.queue_hint.text()
     w.exit_requested=True;w.close()

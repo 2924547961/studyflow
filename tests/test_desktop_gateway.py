@@ -100,3 +100,21 @@ def test_pairing_preferences_never_return_saved_model_credentials(monkeypatch):
     assert g.public_preferences()['model_config']['model']=='chosen'
     assert g._preferences['model_config']['key']=='fixture-private'
 
+
+def test_exam_entry_starts_only_selected_workspace_and_idle_status_does_not_start_it(monkeypatch):
+    from unittest.mock import Mock
+    monkeypatch.setattr(tasks,'_accounts',{'a':object()})
+    monkeypatch.setattr(p,'_sessions',{});monkeypatch.setattr(p,'_local_account',None)
+    monkeypatch.setattr(p,'_states',{})
+    monkeypatch.setattr(d,'_state',{'account_id':'other'})
+    start=Mock(return_value={'status':'starting'});monkeypatch.setattr(p,'start_account_workspace',start)
+    assert g.desktop_account_tool('a','owned_exam_finish_status')['progress']['state']=='not_started'
+    start.assert_not_called()
+    result=g.desktop_account_tool('a','open_course_exam',{'course_name':'chosen'})
+    assert result['error_code']=='ACCOUNT_STARTING' and not result['course_queue_started']
+    assert result['course']=='chosen'
+    start.assert_called_once_with('a',browser_mode='minimized')
+    p._states['a']={'status':'blocked','phase':'setup','error_code':'LOGIN_REJECTED'}
+    assert g.desktop_account_tool('a','open_course_exam',{'course_name':'chosen'})['error_code']=='LOGIN_REJECTED'
+    assert start.call_count==1
+

@@ -57,17 +57,19 @@ REVIEW_TOOLS={
 
 _WORKER_CODES=('ACCOUNT_ALREADY_ACTIVE_IN_ANOTHER_PROCESS','ACCOUNT_IN_USE',
                'EXAM_ACTIVE_KEEP_BROWSER','SUBMISSION_PENDING_KEEP_BROWSER','VERIFICATION_REQUIRED',
+               'TASK_INSPECTION_REQUIRED','TRANSIENT_RECOVERY_EXHAUSTED',
                'EXAM_PAGE_NOT_OPEN','EXAM_PAGE_AMBIGUOUS',
                'LOGIN_REJECTED','PENDING_SUBMISSION_OR_REVIEW','BROWSER_AUTHENTICATION_EXPIRED',
                'BROWSER_RECOVERY_STATE_INVALID','BROWSER_CLOSED','BROWSER_ACTION_TIMEOUT')
 
 class WorkerToolError(RuntimeError):
-    def __init__(self, code='WORKER_TOOL_FAILED'):
+    def __init__(self, code='WORKER_TOOL_FAILED', tool_name=''):
         self.code=code
+        self.tool_name=tool_name
         super().__init__(code+'; inspect only this account; no automatic replay')
 
 
-def _unpack(result):
+def _unpack(result,tool_name=''):
     if getattr(result,'is_error',getattr(result,'isError',False)):
         text=' '.join(getattr(b,'text','') for b in getattr(result,'content',[]))
         code=next((code for code in _WORKER_CODES if code in text),'WORKER_TOOL_FAILED')
@@ -81,7 +83,7 @@ def _unpack(result):
                 ('TimeoutError:','BROWSER_ACTION_TIMEOUT')):
                 if marker in text:
                     code=known;break
-        raise WorkerToolError(code)
+        raise WorkerToolError(code,tool_name)
     structured=getattr(result,'structured_content',getattr(result,'structuredContent',None))
     if structured is not None:return structured
     for block in result.content:
@@ -110,7 +112,8 @@ def parallel_learning_status(account_id:str='', detail:bool=False) -> dict:
     for key,value in values.items():
         item={'account_id':key,'status':value.get('status'),'current':value.get('current'),
               'attention':value.get('attention'),'error_type':value.get('error_type'),
-              'error_code':value.get('error_code'),'phase':value.get('phase'),
+              'error_code':value.get('error_code'),'error_tool':value.get('error_tool'),
+              'phase':value.get('phase'),'diagnostics':value.get('diagnostics'),
               'worker_terminal':value.get('worker_terminal',False),
               'attention_owner':value.get('attention_owner'),
               'user_action_required':value.get('user_action_required',False)}
@@ -118,7 +121,9 @@ def parallel_learning_status(account_id:str='', detail:bool=False) -> dict:
         item['browser_mode'] = ('headless' if direct._state.get('headless') else 'minimized') if key == _local_account else value.get('browser_mode',_mode)
         if detail:item['details']=value
         accounts.append(item)
-    return {'execution':'parallel_account_processes','browser_mode':_mode,'requested_rate':_rate,'account_count':len(accounts),
+    supervisor_available=bool(_active or (_loop is not None and _loop.is_running()))
+    return {'execution':'parallel_account_processes','browser_mode':_mode,'requested_rate':_rate,
+            'supervisor_available':supervisor_available,'account_count':len(accounts),
             'fixed_account_limit':None,'model_api_calls':0,'accounts':accounts,
             'completed':bool(accounts) and all(a['status']=='completed' for a in accounts)}
 
@@ -202,6 +207,7 @@ async def _remote(record,path,rate):
     from . import course_tasks as tasks,smtp_notifications as mail
     aid=record['account_id'];account=tasks._accounts[aid]
     phase='initializing'
+    last_tool=''
     mode=record.get('_browser_mode',_mode)
     env=dict(os.environ,STUDYFLOW_BROWSER_MODE=mode,STUDYFLOW_AUTO_BROWSER='0',PYTHONUTF8='1')
     # Ensure source installation is available even to hosts without PYTHONPATH.
@@ -216,10 +222,12 @@ async def _remote(record,path,rate):
                     await session.initialize()
                     async_lock=asyncio.Lock()
                     async def call(name,args):
+                        nonlocal last_tool
+                        last_tool=name
                         if name in ('learning_batch_status','smtp_notification_status') or name=='owned_exam_finish_status' and not args.get('refresh'):
-                            return _unpack(await session.call_tool(name,args,read_timeout_seconds=15))
+                            return _unpack(await session.call_tool(name,args,read_timeout_seconds=15),name)
                         async with async_lock:
-                            return _unpack(await session.call_tool(name,args,read_timeout_seconds=120))
+                            return _unpack(await session.call_tool(name,args,read_timeout_seconds=120),name)
                     with _lock:_sessions[aid]=call
                     phase='setup'
                     cfg=mail._resolved_config(aid)
@@ -267,8 +275,14 @@ async def _remote(record,path,rate):
                 code=error_code(child)
                 if code!='WORKER_CONNECTION_OR_STARTUP_FAILED':return code
             return 'WORKER_CONNECTION_OR_STARTUP_FAILED'
+        def error_tool(error):
+            if isinstance(error,WorkerToolError) and error.tool_name:return error.tool_name
+            for child in getattr(error,'exceptions',[]):
+                tool=error_tool(child)
+                if tool:return tool
+            return last_tool
         _store(aid,{'status':'blocked','error_type':type(exc).__name__,'error_code':error_code(exc),
-                    'phase':phase,'diagnostics':diagnostics(exc),
+                    'phase':phase,'error_tool':error_tool(exc),'diagnostics':diagnostics(exc),
                     'attention':'Worker connection/startup failed; do not recreate or replay blindly'})
     finally:
         with _lock:
@@ -299,7 +313,7 @@ def start_account_workspace(account_id:str,browser_mode:str='minimized') -> dict
             return {'account_id':account_id,'status':'reused','browser_started':False}
         if account_id in _records:
             if _states.get(account_id,{}).get('worker_terminal'):
-                retry_parallel_account(account_id)
+                retry_parallel_account(account_id,browser_only=True,browser_mode=browser_mode)
             return {'account_id':account_id,'status':'starting','browser_started':False}
         if any(other!=account_id and other in tasks._accounts and tasks._accounts[other].username==tasks._accounts[account_id].username for other in _records):
             raise ValueError('Same learning account already has a workspace')
@@ -504,7 +518,7 @@ def recover_terminal_media_account(account_id:str, expected_course_id:str, expec
             'healthy_workers_unchanged':True,'hourly_timer_restarts':True,'deferred_tasks_preserved':True}
 
 
-def retry_parallel_account(account_id:str, courses:list|None=None) -> dict:
+def retry_parallel_account(account_id:str, courses:list|None=None, browser_only:bool=False, browser_mode:str|None=None) -> dict:
     """Recover a terminated startup worker or an orderly fully completed course worker."""
     with _lock:
         if account_id not in _records:
@@ -528,6 +542,11 @@ def retry_parallel_account(account_id:str, courses:list|None=None) -> dict:
                 raise ValueError('Nonempty course names required')
             _records[account_id]={**_records[account_id],'courses':list(courses)}
         if _loop is None or not _loop.is_running():raise ValueError('Supervisor loop is not live')
+        if browser_only:
+            # Opening an account/exam is not a request to restart its retained
+            # course queue. Keep the course list for a later explicit start.
+            _records[account_id]={**_records[account_id],'_browser_only':True,
+                '_browser_mode':browser_mode or _records[account_id].get('_browser_mode',_mode)}
         _retries[account_id]=fingerprint;_states[account_id]={'status':'starting','recovery_after_code_fix':True}
     folder=_folder or Path.cwd()/'outputs'/'studyflow-batches'
     _loop.call_soon_threadsafe(_schedule_account,_records[account_id],folder,_rate)

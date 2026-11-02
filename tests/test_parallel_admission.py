@@ -54,6 +54,17 @@ def test_idle_workspace_launches_only_one_isolated_browser():
     assert p._states['a']['status']=='running'
 
 
+def test_reopening_completed_account_for_exam_does_not_restart_historical_queue():
+    p._sessions.pop('b')
+    p._states['b']={'status':'completed','worker_terminal':True,'accounts':[{'courses':[
+        {'status':'completed','completion_evidence':'independent_platform_directory','progress':{'remaining':0}}]}]}
+    p.start_account_workspace('b','minimized')
+    args=p._loop.call_soon_threadsafe.call_args.args
+    assert args[1]['_browser_only'] is True and args[1]['_browser_mode']=='minimized'
+    assert args[1]['courses']==['course']
+    assert p._states['a']['status']=='running'
+
+
 def test_selected_queue_uses_existing_idle_worker_even_with_its_own_window_mode(monkeypatch):
     async def scenario():
         calls=[]
@@ -120,6 +131,23 @@ def test_unknown_retry_and_route_are_actionable():
     assert p.retry_parallel_account('c')['error_code']=='ACCOUNT_NOT_REGISTERED'
     assert p.parallel_account_tool('c','browser_status')['error_code']=='ACCOUNT_NOT_REGISTERED'
     assert 'stop_learning_batch' in p.REVIEW_TOOLS
+
+
+def test_worker_status_preserves_task_inspection_error_and_supervisor_settings():
+    from chaoxing_learning_mcp.parallel_runner import _unpack,WorkerToolError
+    result=SimpleNamespace(is_error=True,content=[SimpleNamespace(text='TASK_INSPECTION_REQUIRED')])
+    with pytest.raises(WorkerToolError) as error:_unpack(result,'inspect_current_task')
+    assert error.value.code=='TASK_INSPECTION_REQUIRED'
+    assert error.value.tool_name=='inspect_current_task'
+    status=p.parallel_learning_status()
+    assert status['supervisor_available'] is True
+    assert status['browser_mode']=='headless' and status['requested_rate']==1.25
+
+
+def test_status_exposes_sanitized_worker_diagnostics_to_the_desktop():
+    p._states['a']['diagnostics']=[{'type':'FileNotFoundError','locations':['course_direct.py:999:open_course_chapter']}]
+    account=next(row for row in p.parallel_learning_status()['accounts'] if row['account_id']=='a')
+    assert account['diagnostics']==p._states['a']['diagnostics']
 
 def test_correct_only_terminated_unresolved_startup_queue():
     p._sessions.pop('b');p._states['b']={'status':'stopped','worker_terminal':True,

@@ -63,7 +63,12 @@ def _serialized(fn):
             try:
                 return fn(*args, **kwargs)
             except Exception as exc:
-                _log(fn.__name__, "failed", error=f"{type(exc).__name__}: {str(exc)[:900]}")
+                detail={}
+                if getattr(exc,'studyflow_fault_id',None):
+                    origin=getattr(exc,'studyflow_fault_origin',None) or fn.__name__
+                    exc.studyflow_fault_origin=origin
+                    detail={'fault_id':exc.studyflow_fault_id,'origin_stage':origin}
+                _log(fn.__name__, "failed", error=f"{type(exc).__name__}: {str(exc)[:900]}",**detail)
                 raise
     return wrapped
 
@@ -104,8 +109,20 @@ def _run(fn: Any, *args: Any, **kwargs: Any) -> Any:
         ok, value = done.get(timeout=WORKER_TIMEOUT)
     except queue.Empty:
         _worker_failed = True
-        raise RuntimeError("Browser worker timed out; outcome unknown, no automatic replay") from None
+        error=RuntimeError("Browser worker timed out; outcome unknown, no automatic replay")
+        error.studyflow_fault_id=uuid4().hex
+        _state['worker_failure_id']=error.studyflow_fault_id
+        raise error from None
     if not ok:
+        # Tool transports often replace exceptions with a generic error. Retain
+        # code locations, never arguments/messages or page URLs, at the owner.
+        import traceback
+        from pathlib import Path
+        _state['last_operation_fault']={'operation':getattr(fn,'__qualname__','browser_operation'),
+            'error_type':type(value).__name__,
+            'locations':[Path(f.filename).name+':'+str(f.lineno)+':'+f.name
+                         for f in traceback.extract_tb(value.__traceback__)[-8:]],
+            'at':time.time()}
         raise value
     return value
 
@@ -119,6 +136,19 @@ def _log(stage: str, outcome: str, *, attempt: int = 1, elapsed_ms: int | None =
         _LOG.append(entry)
         del _LOG[:-500]
     return entry
+
+
+def _run_readonly(fn):
+    """Record the source of queue-only inspections, which have no decorated entry."""
+    try:return _run(fn)
+    except RuntimeError as exc:
+        if 'outcome unknown' in str(exc):
+            detail={}
+            if getattr(exc,'studyflow_fault_id',None):
+                exc.studyflow_fault_origin='read_only_inspection'
+                detail={'fault_id':exc.studyflow_fault_id,'origin_stage':'read_only_inspection'}
+            _log('read_only_inspection','failed',error='Browser worker timed out; outcome unknown',**detail)
+        raise
 
 
 def _account(account_id: str) -> Any:
@@ -150,6 +180,24 @@ def _cookies(account: Any) -> list[dict[str, Any]]:
     if not cookies:
         raise ValueError("no session cookies after login")
     return cookies
+
+
+def _verify_seeded_browser_session(page: Any) -> dict[str, Any]:
+    """Read back the browser handoff before any course queue is admitted.
+
+    A successful requests login does not by itself establish that Chromium
+    accepted the session cookies.  Navigate only to the account landing page,
+    then reject a passport redirect before the caller can report the workspace
+    as connected or start a course.
+    """
+    page.goto('https://i.chaoxing.com/', wait_until='domcontentloaded', timeout=20000)
+    current = page.url
+    host = (urlparse(current).hostname or '').lower()
+    if host == 'passport2.chaoxing.com' or host.startswith('passport.'):
+        raise ValueError('BROWSER_AUTHENTICATION_EXPIRED')
+    if not host.endswith('chaoxing.com'):
+        raise ValueError('BROWSER_AUTHENTICATION_UNVERIFIED')
+    return {'browser_authenticated': True, 'browser_host': host}
 
 
 def _launch(channel: str, headless: bool, pw=None) -> Any:
@@ -216,8 +264,13 @@ def start_course_browser(account_id: str = "", headless: bool | None = None,
             account=_account(account_id)
             cookies=_cookies(account)
             _run(lambda:_state['context'].add_cookies(cookies))
+            try:
+                verified = _run(lambda:_verify_seeded_browser_session(_state['page']))
+            except Exception:
+                account_lease.release(_state.pop('account_lease',None))
+                raise
             _state['account_id']=account_id
-            return {**browser_status(),'reused':True,'account_bound':True,'browser_launches':0,'platform_write':False}
+            return {**browser_status(),**verified,'reused':True,'account_bound':True,'browser_launches':0,'platform_write':False}
         return {**browser_status(), "reused": True, "browser_launches": 0, "platform_write": False}
     if account_id:_state['account_lease']=account_lease.acquire(_accounts[account_id].username)
     cookies=_cookies(_account(account_id)) if account_id else []
@@ -252,6 +305,14 @@ def start_course_browser(account_id: str = "", headless: bool | None = None,
         _log("launch", "failed", attempt=2, channel=channel, error=last_error)
         raise ValueError("browser launch failed: " + str(last_error))
 
+    try:
+        verified = _run(lambda:_verify_seeded_browser_session(page)) if account_id else {}
+    except Exception:
+        _run(lambda:context.close())
+        _run(lambda:browser.close())
+        _run(pw.stop)
+        account_lease.release(_state.pop('account_lease',None))
+        raise
     with _lock:
         _state.update(pw=pw, browser=browser, context=context, page=page, frame=None,
                       account_id=account_id or None, channel=channel, started_at=time.time(),
@@ -270,7 +331,7 @@ def start_course_browser(account_id: str = "", headless: bool | None = None,
             "channel": channel, "headless": headless, "cookies_injected": len(cookies),
             "platform_write": False, "browser_launches": 1,
             "generation": _state["generation"], "server_pid": os.getpid(),
-            "note": "browser owned by this MCP process; stop_course_browser closes it"}
+            "note": "browser owned by this MCP process; stop_course_browser closes it", **verified}
 
 
 
@@ -719,7 +780,9 @@ def browser_status() -> dict[str, Any]:
         running=bool(page is not None and browser is not None and browser.is_connected() and not page.is_closed())
         return {"running": running, "account_id": _state.get("account_id"),
                 "server_pid": os.getpid(), "generation": _state.get("generation"),
-                "worker_failed": _worker_failed, "worker_failure_id":next((x.get("ts") for x in reversed(_LOG) if x.get("outcome")=="failed" and "outcome unknown" in (x.get("error") or "")),None), "submit_attempted": _state.get("submit_attempted", False),
+                "worker_failed": _worker_failed,
+                "worker_failure_id": _state.get("worker_failure_id") or next((x.get("ts") for x in reversed(_LOG) if x.get("outcome")=="failed" and "outcome unknown" in (x.get("error") or "")),None),
+                "submit_attempted": _state.get("submit_attempted", False),
                 "channel": _state.get("channel"),
                 "headless": _state.get("headless"),
                 "browser_mode": ("headless" if _state.get("headless") else "minimized") if _state.get('headless') is not None else (_state.get('preferred_browser_mode') or os.environ.get('STUDYFLOW_BROWSER_MODE','headless')),
@@ -1029,16 +1092,33 @@ def open_course_chapter(chapter_id: str) -> dict[str, Any]:
                    if f.locator('#cur' + chapter_id).count()]
         if not matches:
             # The current course landing page opens its task tab by default.
-            # Open the observed chapter tab before looking for the directory.
-            chapter_tab = page.get_by_text('章节', exact=True)
-            if chapter_tab.count() == 1 and chapter_tab.is_visible():
-                chapter_tab.click(timeout=10000)
-                page.wait_for_timeout(2000)
+            # Recent course skins attach the click handler to either the link or
+            # its ``li`` container, so accept exactly one visible observed target.
+            chapter_tab = None
+            for selector in ('li[dataname="zj"] a', 'li[dataname="zj"]'):
+                nav = page.locator(selector)
+                if nav.count() == 1 and nav.is_visible():
+                    chapter_tab = nav
+                    break
+            if chapter_tab is None and hasattr(page, 'get_by_text'):
+                nav = page.get_by_text('章节', exact=True)
+                if nav.count() == 1 and nav.is_visible():
+                    chapter_tab = nav
+            if chapter_tab is None:
+                raise ValueError('Chapter tab is missing or ambiguous on the course landing page')
+            chapter_tab.click(timeout=10000)
+            # Directory content is fetched after the tab click.  A fixed two
+            # second wait caused an ordinary slow load to look like a missing
+            # chapter and stopped the queue at the empty task landing page.
+            for _ in range(6):
+                page.wait_for_timeout(1000)
                 _check_gates(page)
                 matches = [(f, f.locator('#cur' + chapter_id)) for f in page.frames
                            if not f.is_detached() and f.locator('#cur' + chapter_id).count()]
+                if matches:
+                    break
         if len(matches) != 1 or matches[0][1].count() != 1:
-            raise ValueError("Chapter is missing or ambiguous; read directory again")
+            raise ValueError("Chapter directory did not load or chapter is ambiguous; read directory again")
         matches[0][1].click(timeout=10000)
         page.wait_for_timeout(2000)
     _run(select)
@@ -1688,6 +1768,14 @@ def open_course_exam(course_name:str) -> dict[str,Any]:
     if exam is not None and getattr(exam,'state',None) not in ('graded','submitted'):
         inventory=_state.get('owned_exam_inventory') or {}
         if inventory.get('title')==course_name:
+            from . import browser_recovery
+            importlib.reload(browser_recovery)
+            if _state.get('browser') and _state['browser'].is_connected():
+                result=_run(lambda:browser_recovery.resume_exam_tab(_state,_check_gates))
+                if not _state.get('headless'):
+                    try:result['window']=restore_owned_window.__wrapped__()
+                    except Exception as exc:result['window_error_type']=type(exc).__name__
+                return result
             return {**open_account_browser.__wrapped__(show_window=True),'existing_exam':True,'exam_started':False}
         return {'ok':False,'error_code':'EXAM_ACTIVE_KEEP_BROWSER','active_course':inventory.get('title'),
                 'message':'已有考试尚未结束；请打开原考试浏览器，核验或完成后再切换课程。'}
@@ -2662,7 +2750,11 @@ def verify_runtime_resilience() -> dict[str, Any]:
             'production_state_modified':False,'browser_polled':False,'platform_write':False}
 
 
-from .runtime_lifecycle import runtime_health
+def runtime_health():
+    # Stateless API dispatch; preserve lifecycle clock/events across a hot upgrade.
+    from . import runtime_lifecycle
+    importlib.reload(runtime_lifecycle)
+    return runtime_lifecycle.runtime_health()
 from .desktop_gateway import start_desktop_console
 from .exam_capture import start_owned_exam_capture, owned_exam_capture_status, stop_owned_exam_capture, read_owned_exam_observation
 from .owned_exam import read_owned_exam_question, save_owned_exam_answer, stage_owned_exam_reviews, run_owned_exam_queue, recover_owned_exam_worker, owned_exam_review_inventory
@@ -2700,6 +2792,7 @@ def refresh_desktop_implementation():
     import importlib
     from . import desktop_gateway, parallel_runner, media_stream, worker_readback
     with _operation_lock:
+        importlib.reload(review_schema)
         importlib.reload(desktop_gateway)
         importlib.reload(media_stream)
         importlib.reload(worker_readback)
@@ -2717,9 +2810,18 @@ def refresh_desktop_implementation():
                     application_core.__dict__.update(errors)
                     importlib.reload(application_service)
                     service.__class__=application_service.ApplicationService
+                    # Stored bound methods retain the old implementation even
+                    # after __class__ is upgraded. Rebind our own event sink;
+                    # preserve an external adapter's independent callback.
+                    callback=getattr(service.adapter,'on_event',None)
+                    if getattr(callback,'__self__',None) is service:
+                        service.adapter.on_event=service.event
                     service.reviews.__class__=application_core.ReviewCoordinator
                     service.exams.__class__=application_core.ExamCoordinator
                     service.recovery.__class__=application_core.RecoveryCoordinator
+                    if (type(service.model).__module__==application_core.__name__ and
+                            type(service.model).__name__=='ModelReviewer'):
+                        service.model.__class__=application_core.ModelReviewer
                     service_updated=True
         desktop_gateway.install_handler()
         if not parallel_runner._active and not parallel_runner._sessions and not (parallel_runner._loop and parallel_runner._loop.is_running()):
@@ -2731,6 +2833,21 @@ def refresh_desktop_implementation():
             for tool in parallel_runner.TOOLS:
                 if tool.__name__ in registered:server.remove_tool(tool.__name__)
                 server.add_tool(tool)
+        else:
+            # Upgrade admission only. Reloading this module would discard live
+            # sessions/loop/locks. Preserve function objects held by MCP tools.
+            import ast
+            from pathlib import Path
+            names=('start_account_workspace','retry_parallel_account')
+            tree=ast.parse(Path(parallel_runner.__file__).read_text(encoding='utf-8'))
+            nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in names]
+            namespace=dict(parallel_runner.__dict__)
+            exec(compile(ast.Module(body=nodes,type_ignores=[]),parallel_runner.__file__,'exec'),namespace)
+            for name in names:
+                original=getattr(parallel_runner,name);updated=namespace[name]
+                original.__code__=updated.__code__
+                original.__defaults__=updated.__defaults__
+                original.__kwdefaults__=updated.__kwdefaults__
         parallel_runner.REVIEW_TOOLS.update(desktop_gateway.ROUTED)
     return {'updated':True, 'accounts_preserved':True, 'browser_restarted':False,'application_service_updated':service_updated}
 

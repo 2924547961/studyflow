@@ -1,6 +1,64 @@
-"""Read-only recovery decisions. No navigation, credentials or submit retries."""
+"""Owned-browser recovery; only an observed original preview may be reopened, never saves/submits."""
 from urllib.parse import urlparse, parse_qs
 from .exam_browser import attempt_key, PREVIEW_PATH
+
+
+def resume_exam_tab(state, check_gates):
+    """Restore only this attempt's observed preview in the existing context; never save."""
+    import time
+    from .exam_browser import SequentialExam
+    run=state.get('owned_exam_run');context=state.get('context')
+    base={'existing_exam':True,'records_preserved':True,'browser_replaced':False,
+          'submission_replayed':False,'answers_written':0,'exam_started':False}
+    if run is None or context is None:return {**base,'ok':False,'error_code':'EXAM_RECOVERY_PREVIEW_REQUIRED'}
+    if state.get('submit_attempted') or run.state in ('saving','needs_attention','submission_unknown'):
+        return {**base,'ok':False,'error_code':'SUBMISSION_PENDING_KEEP_BROWSER'}
+    matches=[];other=[]
+    for page in context.pages:
+        if page.is_closed():continue
+        try:identity=attempt_key(page.url)
+        except ValueError:continue
+        (matches if identity==run.identity else other).append(page)
+    if len(matches)>1 or other:return {**base,'ok':False,'error_code':'EXAM_PAGE_AMBIGUOUS'}
+    opened=False
+    if matches:page=matches[0]
+    else:
+        url=state.get('exam_recovery_url')
+        if recovery_target(url,run.identity)!='preview':
+            return {**base,'ok':False,'error_code':'EXAM_RECOVERY_PREVIEW_REQUIRED'}
+        page=state.get('exam_resume_page')
+        if page is None or page.is_closed():
+            page=context.new_page();state['exam_resume_page']=page
+            state['page']=page
+            page.goto(url,wait_until='domcontentloaded',timeout=15000);opened=True
+    state['page']=page
+    if observe_submitted_receipt(state):
+        return {**base,'ok':True,'submitted':True,'recovery_state':'platform_submission_confirmed'}
+    try:
+        check_gates(page)
+        if attempt_key(page.url)!=run.identity:raise ValueError('identity mismatch')
+        if urlparse(page.url).path!=PREVIEW_PATH:
+            return {**base,'ok':True,'recovery_state':'existing_question_tab','readback_verified':False}
+        driver=SequentialExam(page,run);deadline=time.monotonic()+15
+        while True:
+            try:snap=driver.read(preview=True)
+            except ValueError as exc:
+                if str(exc)!='incomplete, unsupported or encoded question data':raise
+                snap={}
+            if snap.get('all_questions_loaded'):break
+            if time.monotonic()>=deadline:raise ValueError('preview loading timeout')
+            page.wait_for_timeout(100)
+        actual={q['question_id']:{'answer':q['saved_answer'],'fingerprint':q['fingerprint']} for q in snap['questions']}
+        if any(actual.get(qid)!=saved for qid,saved in run.saved.items()):
+            return {**base,'ok':False,'error_code':'EXAM_RECOVERY_READBACK_MISMATCH'}
+        complete=bool(run.total and len(run.saved)==run.total)
+        if complete and not driver.audit(snap)['all_reviewed_answers_match']:
+            return {**base,'ok':False,'error_code':'EXAM_RECOVERY_READBACK_MISMATCH'}
+        state['owned_exam_inventory']=snap
+        return {**base,'ok':True,'tab_reopened':opened,'saved_count':len(run.saved),'total':run.total,
+                'readback_verified':True,'all_answers_verified':complete,'recovery_state':'original_attempt_restored'}
+    except ValueError:
+        return {**base,'ok':False,'error_code':'EXAM_RECOVERY_NEEDS_VERIFICATION','browser_opened':True}
 
 
 def observe_submitted_receipt(state):

@@ -80,6 +80,25 @@ def test_unknown_save_does_not_retry(monkeypatch):
     assert result['progress']['saved_count']==0
 
 
+def test_one_invalid_review_does_not_discard_other_staged_answers(monkeypatch):
+    from chaoxing_learning_mcp import course_direct as d,owned_exam
+    qs=[question('first'),question('second')]
+    run=ExamRun('owned',('host','1','2','3','4'))
+    driver=SequentialExam(None,run)
+    def validate(snap,answer,review):
+        if review.get('invalid'):raise ValueError('invalid option schema')
+    monkeypatch.setattr(driver,'validate_review',validate)
+    monkeypatch.setattr(driver,'resolve',lambda snap:None)
+    monkeypatch.setattr(owned_exam,'_driver',lambda:driver)
+    monkeypatch.setattr(d,'_run',lambda fn:fn())
+    monkeypatch.setattr(d,'_state',{'owned_exam_inventory':{'questions':qs}})
+    result=owned_exam.stage_owned_exam_reviews([{'fingerprint':q['fingerprint'],'answer':'A',
+        'review':{'model_reviewed':True,'invalid':i==1}} for i,q in enumerate(qs)])
+    assert result['staged']==1 and result['platform_write'] is False
+    assert list(run.reviews)==[qs[0]['fingerprint']]
+    assert result['rejected'][0]['fingerprint']==qs[1]['fingerprint']
+
+
 @pytest.mark.parametrize('marker',['check_answer','check_answer_dx'])
 def test_both_observed_selection_markers(marker):
     class Row:
@@ -149,6 +168,39 @@ def test_final_preview_recovers_confirmed_last_save_without_replaying(monkeypatc
     result=driver.audit({'all_questions_loaded':True,'questions':[{**q,'saved_answer':'A'}]})
     assert result['all_reviewed_answers_match'] and checked==['A']
     assert run.error is None and len(run.saved)==1
+
+
+@pytest.mark.parametrize('first_render',['incomplete','partial','wrong_identity'])
+def test_last_save_waits_for_complete_preview_without_clicking_again(monkeypatch,first_render):
+    from unittest.mock import Mock
+    from chaoxing_learning_mcp.exam_browser import PREVIEW_PATH
+    q=question();run=ExamRun('owned',('host','1','2','3','4'),total=1)
+    page=Mock();page.url='https://mooc1.chaoxing.com'+PREVIEW_PATH
+    next_control=Mock();next_control.count.return_value=0
+    preview=Mock()
+    page.get_by_role.side_effect=lambda role,**kw:next_control if kw['name']=='下一题' else preview
+    driver=SequentialExam(page,run)
+    snap={'questions':[q],'state':{'start':'0'},'question_token':'token'}
+    reads=[]
+    def read(*,preview=False):
+        if not preview:return snap
+        reads.append(True)
+        if len(reads)==1:
+            if first_render=='incomplete':raise ValueError('incomplete, unsupported or encoded question data')
+            if first_render=='wrong_identity':raise ValueError('page exam identity mismatch')
+        return {'all_questions_loaded':not(first_render=='partial' and len(reads)==1),
+                'questions':[{**q,'saved_answer':'A'}]}
+    monkeypatch.setattr(driver,'read',read)
+    monkeypatch.setattr(driver,'validate_review',lambda *a:'A')
+    monkeypatch.setattr(driver,'_select',lambda *a:None)
+    monkeypatch.setattr(driver,'_assert_selected',lambda *a:None)
+    if first_render=='wrong_identity':
+        with pytest.raises(ValueError,match='identity'):driver.step('token','A',{})
+        assert run.state=='needs_attention' and not run.saved
+    else:
+        assert driver.step('token','A',{})['all_reviewed_answers_match']
+        assert len(reads)==2 and len(run.saved)==1
+    preview.click.assert_called_once()
 
 
 @pytest.mark.parametrize('earned,marker,complete', [('1.0','',True), ('0.0','',True),

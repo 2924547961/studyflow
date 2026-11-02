@@ -165,6 +165,22 @@ def desktop_account_tool(account_id: str, tool_name: str, arguments: dict | None
     if account_id not in tasks._accounts: raise ValueError('UNKNOWN_ACCOUNT')
     args = dict(arguments or {})
     if 'account_id' in args and args['account_id'] != account_id: raise ValueError('ACCOUNT_ID_MISMATCH')
+    connected=account_id in p._sessions or p._local_account==account_id or d._state.get('account_id')==account_id
+    if (tool_name in ('open_course_exam','open_account_browser') and account_id!=p._local_account
+            and p._states.get(account_id,{}).get('status')=='starting'):
+        return {'ok':False,'error_code':'ACCOUNT_STARTING','retry_after_seconds':2,
+                'account_id':account_id,'course':args.get('course_name'),'course_queue_started':False}
+    if not connected and tool_name=='owned_exam_finish_status':
+        return {'running':False,'progress':{'state':'not_started','total':0,'saved_count':0,
+                'questions':[]},'account_start_required':True}
+    if not connected and tool_name in ('open_course_exam','open_account_browser'):
+        state=p._states.get(account_id,{})
+        if state.get('status')=='blocked' and state.get('phase')=='setup':
+            return {'ok':False,'error_code':state.get('error_code') or 'LOGIN_REQUIRED'}
+        startup=p.start_account_workspace(account_id,browser_mode='minimized')
+        return {'ok':False,'error_code':'ACCOUNT_STARTING','retry_after_seconds':2,
+                'account_id':account_id,'course':args.get('course_name'),
+                'course_queue_started':False,'startup':startup}
     if tool_name in ('smtp_notification_status','bind_account_notification_email','configure_notification_interval'):
         args.setdefault('account_id',account_id)
     if tool_name=='list_courses':
